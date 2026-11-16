@@ -1,0 +1,31 @@
+{
+  "name": "atlas",
+  "version": "0.1.0",
+  "description": "Atlas：一个面板看清、整理、开关和直接编辑记忆、CLAUDE.md、会话、Skills、系统提示词、工具与 Hooks。",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "editorModel": {
+      "type": "string",
+      "title": "合并记忆用的模型",
+      "description": "在「记忆整理」看板里把一张卡片拖到另一张上合并时，用哪个模型写合并后的文件。",
+      "default": "sonnet",
+      "options": [
+        "haiku",
+        "sonnet",
+        "opus"
+      ]
+    },
+    "trashDays": {
+      "type": "string",
+      "title": "删除后在回收站保留几天",
+      "description": "面板里「删除」的东西先进 Atlas 的回收站，过了这么多天自动清空（每次删除时也可以单独改）。",
+      "default": "7",
+      "options": [
+        "1",
+        "7",
+        "30",
+        "90"
+      ]
+    }
+  }
+}

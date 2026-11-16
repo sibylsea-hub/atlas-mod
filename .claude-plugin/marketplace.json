@@ -1,0 +1,5 @@
+{
+  "name": "atlas",
+  "owner": { "name": "sibylsea-hub" },
+  "plugins": [{ "name": "atlas", "source": "./" }]
+}
