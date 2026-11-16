@@ -71,7 +71,7 @@ import type { HookPatch, HookRow, SectionRow, ToolMark, ToolPlace, ToolRow, Tool
 import * as core from './model'
 import { SKINS, skinOf } from './skins'
 import type { ButtonKind, ChipTone, PaperStyle, Skin } from './skins'
-import { EDGE_TAG, IO_CLASS, TRASH_DAYS, crossSvg, docMaps, held, isProjectKey, renameNote, scopeLabel, treeRoots } from './model'
+import { EDGE_TAG, IO_CLASS, NEVER, TRASH_DAYS, crossSvg, docMaps, held, isProjectKey, keepLabel, keepNote, keepShort, renameNote, scopeLabel, treeRoots } from './model'
 import {
   basename,
   cellWidth,
@@ -133,6 +133,10 @@ export type Actions = {
   restore: (ids: string[]) => void
   purgeNow: (id: string) => void
   setExpiry: (id: string, days: string) => void
+  /** Empties the whole trash now, whatever each item's expiry says. */
+  purgeAll: () => void
+  /** This machine's keep period for what is deleted from now on: days, or `never`. */
+  trashDefault: (days: string) => void
   archiveMemory: (path: string, label: string) => void
   setArchived: (kind: 'sessions' | 'projects', id: string, on: boolean) => void
   loadTrash: () => void
@@ -183,7 +187,7 @@ export type Snap = {
   trash: AtlasTrash
   manage: AtlasManage
   editorModel: string
-  /** The trashDays option: the keep period a 删除 uses unless the Select says otherwise. */
+  /** The keep period a 删除 uses unless the Select says otherwise: this machine's pick on the 回收站 page, else the plugin's option. */
   trashDays: string
   act: Actions
 }
@@ -513,11 +517,11 @@ function pathRow(r: R, key: string, text: string, path: string, isDir: boolean):
 }
 
 function daysLabel(d: string): string {
-  return `保留 ${d} 天`
+  return keepLabel(d)
 }
 
 /**
- * 删除 → 确认删除（N 天后自动清空）: two presses, the keep period beside it.
+ * 删除 → 确认删除（N 天后自动清空 / 不会自动清空）: two presses, the keep period beside it.
  * Everything goes through atlas.py trash; nothing here deletes.
  */
 function deleteControl(r: R, key: string, paths: string[], label: string, kind?: string, warn?: string): RenderElement[] {
@@ -535,7 +539,7 @@ function deleteControl(r: R, key: string, paths: string[], label: string, kind?:
         onSelect={v => r.act.view(x => ({ ...x, trashDays: v }))}
       />
       {isPending ? (
-        <Button key={`delok:${key}`} label={`确认删除（${days} 天后自动清空）`} variant="primary" onPress={() => r.act.trash(paths, label, kind)} />
+        <Button key={`delok:${key}`} label={`确认删除（${keepNote(days)}）`} variant="primary" onPress={() => r.act.trash(paths, label, kind)} />
       ) : (
         <Button key={`del:${key}`} label="删除" onPress={() => r.act.pending(pendingKey)} />
       )}
@@ -1119,7 +1123,7 @@ function drawSort(r: R): RenderElement[] {
   if (m.status === 'ready') {
     out.push(title(r, 'merge-title', `合并到 ${sp(r, m.target)}`))
     out.push(m.diff ? <Code key="merge-diff" source={m.diff} format="diff" /> : dim(r, 'merge-same', '合并结果和目标文件一样'))
-    out.push(dim(r, 'merge-note', `合并后 ${basename(m.source)} 会移进回收站（${r.view.trashDays || r.trashDays} 天后自动清空），并从 MEMORY.md 去掉`))
+    out.push(dim(r, 'merge-note', `合并后 ${basename(m.source)} 会移进回收站（${keepNote(r.view.trashDays || r.trashDays)}），并从 MEMORY.md 去掉`))
     out.push(
       actions(r, [
         <Button key="merge-apply" label="应用" variant="primary" onPress={() => r.act.applyMerge()} />,
@@ -2510,7 +2514,46 @@ function drawTrash(r: R): RenderElement[] {
   const t = r.trash
   const bytes = t.status === 'ready' ? t.bytes : r.idx.trash?.bytes ?? 0
   out.push(title(r, 'trash-total', `回收站占用 ${fmtSize(bytes)}`))
-  out.push(dim(r, 'trash-auto', '到期的东西每 6 小时自动清空一次；只在开着带 Atlas 的会话时才会运行。'))
+  // how long a deleted thing is kept from now on: this machine's default, for every session and project
+  const keep = r.trashDays
+  out.push(
+    choice(
+      r,
+      'trash-keep',
+      '以后删除的东西保留多久：',
+      (TRASH_DAYS as readonly string[]).includes(keep) ? keep : '',
+      [
+        ...((TRASH_DAYS as readonly string[]).includes(keep) ? [] : [{ value: '', label: keepLabel(keep), short: keepShort(keep), why: `现在是${keepLabel(keep)}（插件设置里填的）。选一项就改成这台电脑的默认值。` }]),
+        ...TRASH_DAYS.map(d => ({
+          value: d,
+          label: keepLabel(d),
+          short: keepShort(d),
+          why:
+            d === NEVER
+              ? '删除的东西一直留在回收站，只有你点「清空」才会消失。这台电脑的所有会话都用这个默认值；每次删除时还能单独改。'
+              : `删除后保留 ${d} 天，到期自动清空。这台电脑的所有会话都用这个默认值；每次删除时还能单独改。`,
+        })),
+      ],
+      v => {
+        if (v) r.act.trashDefault(v)
+      },
+    ),
+  )
+  out.push(dim(r, 'trash-auto', '到期的东西会自动清空：开着带 Atlas 的会话时，每 6 小时检查一次。'))
+  out.push(dim(r, 'trash-auto-2', '改默认值只管以后删除的；已经在回收站里的各按各的，可以在下面逐项改。'))
+  if (t.status === 'ready' && t.items.length > 0) {
+    const isAll = r.view.pending === 'purge:all'
+    out.push(
+      <Box key="trash-all-row" flexDirection="row" gap={1} flexWrap="wrap">
+        {isAll ? (
+          <Button key="purgeallok" label={`确认永久删除全部 ${t.items.length} 项`} variant="primary" onPress={() => r.act.purgeAll()} />
+        ) : (
+          <Button key="purgeall" label="清空回收站" onPress={() => r.act.pending('purge:all')} />
+        )}
+        {isAll ? <Button key="purgeallno" label="取消" onPress={() => r.act.pending(null)} /> : null}
+      </Box>,
+    )
+  }
   if (t.status === 'loading') out.push(dim(r, 'trash-loading', '正在读回收站…'))
   if (t.status === 'error' && t.error) {
     out.push(
@@ -2522,7 +2565,7 @@ function drawTrash(r: R): RenderElement[] {
   if (t.status === 'ready' && t.items.length === 0) out.push(dim(r, 'trash-empty', '回收站是空的'))
   for (const it of t.items) {
     out.push(title(r, `ti:${it.id}`, `${it.label}（${it.kind}）`))
-    out.push(dim(r, `tm:${it.id}`, `${fmtSize(it.sizeBytes)} · ${fmtMD(it.deletedAtMs, r.tz)} 删除 · ${fmtMD(it.expiresAtMs, r.tz)} 清空`))
+    out.push(dim(r, `tm:${it.id}`, `${fmtSize(it.sizeBytes)} · ${fmtMD(it.deletedAtMs, r.tz)} 删除 · ${it.expiresAtMs > 0 ? `${fmtMD(it.expiresAtMs, r.tz)} 自动清空` : '不会自动清空'}`))
     out.push(dim(r, `tp:${it.id}`, `原位置：${sp(r, it.originalPath)}${it.exists ? '' : '（内容已不在）'}`))
     const pendingKey = `purge:${it.id}`
     const isPending = r.view.pending === pendingKey
@@ -2538,7 +2581,7 @@ function drawTrash(r: R): RenderElement[] {
         <Select
           key={`expiry:${it.id}`}
           label="改保存时间"
-          options={TRASH_DAYS.map(d => ({ value: d, label: `${d} 天` }))}
+          options={TRASH_DAYS.map(d => ({ value: d, label: keepShort(d) }))}
           onSelect={v => r.act.setExpiry(it.id, v)}
         />
       </Box>,

@@ -154,7 +154,8 @@ export type TrashMeta = {
   pathClass: string
   label: string
   deletedAtMs: number
-  expiresAtMs: number
+  /** Null for an item kept until it is emptied by hand. */
+  expiresAtMs: number | null
   sizeBytes: number
   exists?: boolean
 }

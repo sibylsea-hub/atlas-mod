@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Atlas</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="window.css">
+<script src="window.js" defer></script>
+</head>
+<body>
+<main id="root"><p id="wait" class="wait">正在连接 Atlas…</p></main>
+<div id="toasts" role="status" aria-live="polite"></div>
+<div id="lost" hidden>
+  <div class="lost-card" role="alertdialog" aria-labelledby="lost-title" aria-describedby="lost-text">
+    <p id="lost-title" class="lost-title">这个窗口和 Atlas 断开了</p>
+    <p id="lost-text">会话结束了，或者 Atlas 重新加载过。在终端里再发一次 <code>/atlas</code>，会打开新的窗口。</p>
+    <button id="lost-close" type="button" class="btn secondary">关闭这个窗口</button>
+  </div>
+</div>
+<noscript><p class="wait">这个页面需要 JavaScript 才能显示 Atlas。</p></noscript>
+</body>
+</html>

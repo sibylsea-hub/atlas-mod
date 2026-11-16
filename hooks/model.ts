@@ -176,6 +176,7 @@ export function normalizePrefs(raw: unknown): AtlasPrefs {
     prompt: normalizePromptPrefs(r.prompt),
     hooksOff: normalizeParked(r.hooksOff),
     ...(typeof r.skin === 'string' && r.skin ? { skin: r.skin } : {}),
+    ...(isKeep(r.trashDays) ? { trashDays: r.trashDays } : {}),
   }
 }
 
@@ -437,7 +438,29 @@ export const EDGE_TAG: Record<string, string> = {
 
 export const IO_CLASS: Record<IoDir['class'], string> = { project: '项目内', scratch: '临时', claude: 'Claude', external: '外部' }
 
-export const TRASH_DAYS = ['1', '7', '30', '90'] as const
+/** How long a deleted thing may be kept: a number of days, or `never` (kept until it is emptied by hand). */
+export const NEVER = 'never'
+export const TRASH_DAYS = ['1', '7', '30', '90', NEVER] as const
+
+/** True for a keep period atlas.py takes: whole days, or `never`. */
+export function isKeep(v: unknown): v is string {
+  return typeof v === 'string' && (v === NEVER || /^\d{1,4}$/.test(v))
+}
+
+/** `保留 7 天` / `一直保留，只手动清空`: a keep period as a choice reads. */
+export function keepLabel(days: string): string {
+  return days === NEVER ? '一直保留，只手动清空' : `保留 ${days} 天`
+}
+
+/** `7 天` / `只手动清空`: the same, short. */
+export function keepShort(days: string): string {
+  return days === NEVER ? '只手动清空' : `${days} 天`
+}
+
+/** `7 天后自动清空` / `不会自动清空`: what becomes of a thing deleted under that keep period. */
+export function keepNote(days: string): string {
+  return days === NEVER ? '不会自动清空' : `${days} 天后自动清空`
+}
 
 export type DocMaps = { byId: Map<string, DocNode>; out: Map<string, DocEdge[]> }
 

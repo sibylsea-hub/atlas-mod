@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { isKeep, keepLabel, keepNote, normalizePrefs } from './model'
 import type { AtlasIndex, DocNode, MemoryFile, TrashMeta } from './data'
 import type { AtlasSwitches } from '../types'
 import { filterSkillListing, lineDiff, reorderIndexLinks, replaceLine, splitLines, joinLines } from './text'
@@ -232,7 +233,7 @@ function world(
         if (files.length === 0) continue
         for (const [k] of files) fs.delete(k)
         const id = `1760000300000-0000000${seq++}`
-        const meta: TrashMeta = { id, originalPath: path, kind: flag('--kind') ?? 'memory', pathClass: 'memory', label: flag('--label') ?? base(path), deletedAtMs: 1_760_000_300_000, expiresAtMs: 1_760_000_300_000 + Number(flag('--days') ?? 30) * 86_400_000, sizeBytes: 10 }
+        const meta: TrashMeta = { id, originalPath: path, kind: flag('--kind') ?? 'memory', pathClass: 'memory', label: flag('--label') ?? base(path), deletedAtMs: 1_760_000_300_000, expiresAtMs: flag('--days') === 'never' ? null : 1_760_000_300_000 + Number(flag('--days') ?? 30) * 86_400_000, sizeBytes: 10 }
         trash.set(id, { meta, files })
         trashed.push(meta)
       }
@@ -256,6 +257,11 @@ function world(
         trash.delete(now)
         return { purged: item ? [item.meta] : [], keptCount: trash.size, freedBytes: item ? item.meta.sizeBytes : 0, dryRun: false, refused: [] }
       }
+      if (args.includes('--all')) {
+        const all = [...trash.values()].map(t => t.meta)
+        trash.clear()
+        return { purged: all, keptCount: 0, freedBytes: all.reduce((n, m) => n + m.sizeBytes, 0), dryRun: false, refused: [] }
+      }
       const purged = opts.autoPurged ?? []
       return { purged, keptCount: trash.size, freedBytes: purged.reduce((n, m) => n + m.sizeBytes, 0), dryRun: false, refused: [] }
     }
@@ -265,7 +271,7 @@ function world(
     }
     if (cmd === 'set-expiry') {
       const item = trash.get(args[1] ?? '')
-      if (item) item.meta = { ...item.meta, expiresAtMs: 1_760_000_300_000 + Number(flag('--days')) * 86_400_000 }
+      if (item) item.meta = { ...item.meta, expiresAtMs: flag('--days') === 'never' ? null : 1_760_000_300_000 + Number(flag('--days')) * 86_400_000 }
       return item ? { updated: item.meta } : { refused: [{ id: args[1], reason: '没有这一项' }] }
     }
     if (cmd === 'archive-memory') {
@@ -902,7 +908,8 @@ both('回收站: 恢复, 改保存时间, and 立即清空 only after 确认永�
   const ui = await mountPane($, surface)
   await ui.press({ key: 'tab:trash' })
   expect(await ui.find({ type: 'Text', text: '回收站占用 4.0 KB' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '到期的东西每 6 小时自动清空一次；只在开着带 Atlas 的会话时才会运行。' })).toBeDefined()
+  // six hours is how often what has expired is looked for, not how long a thing is kept: the page says so
+  expect(await ui.find({ type: 'Text', text: '到期的东西会自动清空：开着带 Atlas 的会话时，每 6 小时检查一次。' })).toBeDefined()
   await ui.select({ key: `expiry:${ITEM.id}`, value: '90' })
   expect(w.runs.map(r => r.slice(3))).toContainEqual(['set-expiry', ITEM.id, '--days', '90'])
   await ui.press({ key: `purge:${ITEM.id}` })
@@ -946,6 +953,90 @@ both('an archived session leaves the list until 显示已归档', async ($, on, 
   expect(await ui.find({ key: `sess:${S1}` })).toBeDefined()
   expect(w.runs.some(r => r[3] === 'trash')).toBe(false)
   await ui.unmount()
+})
+
+both('回收站: the keep period is picked on the page for this machine; 只手动清空 keeps a deleted thing until it is emptied by hand', async ($, on, surface) => {
+  const w = world(on, { files: { ...baseFiles(), [S1]: '{}\n' }, trashed: [ITEM] })
+  await start($, w)
+  const ui = await mountPane($, surface)
+  await ui.press({ key: 'tab:trash' })
+  // the plugin's option stands until a pick is made here
+  if (surface === 'desktop') expect((await ui.find({ key: 'trash-keep:7' }))?.props.variant).toBe('primary')
+  else expect((await ui.find({ key: 'trash-keep' }))?.props.value).toBe('7')
+  if (surface === 'desktop') await ui.press({ key: 'trash-keep:never' })
+  else await ui.select({ key: 'trash-keep', value: 'never' })
+  expect((w.state.prefs as { trashDays?: string } | undefined)?.trashDays).toBe('never')
+  expect(w.toasts).toContain('以后删除的东西一直保留，只手动清空')
+  if (surface === 'desktop') {
+    expect((await ui.find({ key: 'trash-keep:never' }))?.props.variant).toBe('primary')
+    // the card says whom the pick is for
+    expect(await ui.find({ type: 'Text', text: /这台电脑的所有会话都用这个默认值/ })).toBeDefined()
+  }
+  // what was already in the trash keeps its own expiry
+  expect(w.trash.get(ITEM.id)?.meta.expiresAtMs).toBe(ITEM.expiresAtMs)
+  // a delete from now on asks atlas.py for no expiry, and says so before and after
+  await ui.press({ key: 'tab:sessions' })
+  await ui.press({ key: `sess:${S1}` })
+  await ui.press({ key: `del:session:${S1}` })
+  expect((await ui.find({ key: `delok:session:${S1}` }))?.props.label).toBe('确认删除（不会自动清空）')
+  await ui.press({ key: `delok:session:${S1}` })
+  const run = w.runs.map(r => r.slice(3)).find(r => r[0] === 'trash')
+  expect(run?.slice(1, 4)).toEqual([`${CD}/projects/${SLUG}/sess-1.jsonl`, '--days', 'never'])
+  expect(w.toasts).toContain('已删除 会话「整理记忆」，在回收站里一直留着，可以恢复')
+  const kept = [...w.trash.values()].map(t => t.meta).find(m => m.id !== ITEM.id)
+  expect(kept?.expiresAtMs).toBeNull()
+  await ui.press({ key: 'tab:trash' })
+  expect(await ui.find({ type: 'Text', text: /删除 · 不会自动清空$/ })).toBeDefined()
+  // one item's own expiry can be taken away or given the same way
+  await ui.select({ key: `expiry:${ITEM.id}`, value: 'never' })
+  expect(w.runs.map(r => r.slice(3))).toContainEqual(['set-expiry', ITEM.id, '--days', 'never'])
+  expect(w.toasts).toContain('改成不会自动清空')
+  // a pick made at one delete stands for this session only, over the machine's default
+  await ui.unmount()
+})
+
+both('回收站: a session starts from the keep period this machine picked', async ($, on, surface) => {
+  const w = world(on, { files: { ...baseFiles(), [S1]: '{}\n' }, store: { prefs: { trashDays: '90' } } })
+  await start($, w)
+  const ui = await mountPane($, surface)
+  await ui.press({ key: 'tab:sessions' })
+  await ui.press({ key: `sess:${S1}` })
+  await ui.press({ key: `del:session:${S1}` })
+  expect((await ui.find({ key: `delok:session:${S1}` }))?.props.label).toBe('确认删除（90 天后自动清空）')
+  await ui.unmount()
+  void w
+})
+
+both('回收站: 清空回收站 empties everything, whatever its expiry, only after 确认', async ($, on, surface) => {
+  const w = world(on, { trashed: [ITEM, { ...ITEM, id: '1760000000000-abcdef02', label: 'two.md', expiresAtMs: null }] })
+  await start($, w)
+  const ui = await mountPane($, surface)
+  await ui.press({ key: 'tab:trash' })
+  await ui.press({ key: 'purgeall' })
+  expect(w.runs.some(r => r[3] === 'purge' && r.includes('--all'))).toBe(false)
+  expect((await ui.find({ key: 'purgeallok' }))?.props.label).toBe('确认永久删除全部 2 项')
+  // backing out leaves everything where it was
+  await ui.press({ key: 'purgeallno' })
+  expect(await ui.find({ key: 'purgeallok' })).toBeUndefined()
+  expect(w.trash.size).toBe(2)
+  await ui.press({ key: 'purgeall' })
+  await ui.press({ key: 'purgeallok' })
+  expect(w.runs.map(r => r.slice(3))).toContainEqual(['purge', '--all'])
+  expect(w.trash.size).toBe(0)
+  expect(await ui.find({ type: 'Text', text: '回收站是空的' })).toBeDefined()
+  // with nothing in it there is nothing to empty
+  expect(await ui.find({ key: 'purgeall' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a stored keep period is days or never; anything else is dropped', () => {
+  expect(normalizePrefs({ trashDays: '30' }).trashDays).toBe('30')
+  expect(normalizePrefs({ trashDays: 'never' }).trashDays).toBe('never')
+  for (const junk of ['', 'soon', '-1', '1.5', 7, null, undefined, '99999']) expect(normalizePrefs({ trashDays: junk }).trashDays, String(junk)).toBeUndefined()
+  expect(keepNote('7')).toBe('7 天后自动清空')
+  expect(keepNote('never')).toBe('不会自动清空')
+  expect(keepLabel('never')).toBe('一直保留，只手动清空')
+  expect(isKeep('never') && isKeep('0') && !isKeep('Never') && !isKeep('7 ')).toBe(true)
 })
 
 test('session.start purges expired trash and says what it freed', async ($, on) => {

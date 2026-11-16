@@ -22,7 +22,7 @@ This file is the only thing the two halves share. Change it first if the shape m
 <python> -I <root>/bin/atlas.py search QUERY [--claude-dir DIR] [--limit N]
 <python> -I <root>/bin/atlas.py trash PATH... [--days N] [--kind KIND] [--label TEXT] [--protect-session ID] [--claude-dir DIR] [--cache FILE]
 <python> -I <root>/bin/atlas.py restore ID... [--claude-dir DIR]
-<python> -I <root>/bin/atlas.py purge [--dry-run] [--now ID...] [--claude-dir DIR]
+<python> -I <root>/bin/atlas.py purge [--dry-run] [--now ID... | --all] [--claude-dir DIR]
 <python> -I <root>/bin/atlas.py trash-list [--claude-dir DIR]
 <python> -I <root>/bin/atlas.py set-expiry ID --days N [--claude-dir DIR]
 <python> -I <root>/bin/atlas.py archive-memory PATH --project-label LABEL [--claude-dir DIR]
@@ -489,7 +489,7 @@ a second part is `payload.1`) and `meta.json`:
   "pathClass": "session",              // project | session | memory | shared-memory | memory-archive | user-skill
                                        // | project-skill | project-claude-md | scratch-workspace
   "label": "...",                      // --label, else the file name
-  "deletedAtMs": 0, "expiresAtMs": 0,  // expires = deleted + --days (default 30) days
+  "deletedAtMs": 0, "expiresAtMs": 0,  // expires = deleted + --days (default 30) days; null under `--days never`
   "sizeBytes": 0,
   "parts": [ { "originalPath": "/abs/<id>.jsonl", "payload": "payload" },
              { "originalPath": "/abs/<id>",       "payload": "payload.1" } ],
@@ -532,10 +532,12 @@ Outputs:
   at its originalPath now (never overwrites), recreating missing parent dirs, re-inserts indexLines that are not
   already present at their old line numbers, then removes the item folder.
 - `purge [--dry-run]` → `{ "purged": [meta], "keptCount": 0, "freedBytes": 0, "dryRun": false, "refused": [...] }`:
-  removes items whose expiresAtMs has passed; `--now ID...` removes exactly those items now (the pane's 立即清空);
-  `--dry-run` reports the same without removing anything.
+  removes items whose expiresAtMs has passed, leaving those whose expiresAtMs is null (kept until emptied by hand);
+  `--now ID...` removes exactly those items now (the pane's 立即清空); `--all` removes every item whatever its
+  expiry (the pane's 清空回收站); `--dry-run` reports the same without removing anything.
 - `trash-list` → `{ "path", "items": [meta + "exists"], "bytes" }`, newest first; read-only.
-- `set-expiry ID --days N` → `{ "updated": meta }` with expiresAtMs = now + N days.
+- `set-expiry ID --days N` → `{ "updated": meta }` with expiresAtMs = now + N days, or null for `--days never`.
+  `trash` takes `--days never` the same way.
 - `archive-memory PATH --project-label LABEL` → `{ "archived": { "from", "to", "indexLines" } | null, "refused": [...] }`:
   moves a project memory file (not a symlink) to `<claude-dir>/memory-archive/<LABEL>/<name>` (LABEL: no `/`, not
   hidden; never overwrites), removes its MEMORY.md lines. Not trash: no expiry, never purged.

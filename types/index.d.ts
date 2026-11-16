@@ -208,6 +208,8 @@ export type AtlasPrefs = {
   hooksOff?: AtlasParkedHook[]
   /** The skin the desktop pane wears on this machine, by its id; absent = the first one (手帐). */
   skin?: string
+  /** How long a deleted thing is kept on this machine, picked on the 回收站 page: days, or `never`; absent = the plugin's option. */
+  trashDays?: string
 }
 
 export type AtlasTrashItem = {
@@ -216,6 +218,7 @@ export type AtlasTrashItem = {
   kind: string
   label: string
   deletedAtMs: number
+  /** When it is emptied by itself; 0 for one kept until it is emptied by hand. */
   expiresAtMs: number
   sizeBytes: number
   exists: boolean

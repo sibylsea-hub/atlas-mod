@@ -4,11 +4,11 @@
 //
 // Every function that touches `$` or `$.state` lives in this file: the
 // engine follows `$` only into functions declared in the same file, and reads
-// state only through atoms declared here. model.ts, text.ts and views.tsx are
-// pure.
+// state only through atoms declared here. model.ts, text.ts, views.tsx and
+// window.ts are pure.
 
-import { atom, read, update } from 'claude-code'
-import type { EngineInterface, InstructionFile, Register, RenderSurface } from 'claude-code'
+import { atom, read, update as engineUpdate } from 'claude-code'
+import type { Atom, EngineInterface, InstructionFile, Register, RenderSurface } from 'claude-code'
 
 import type {
   AtlasCtx,
@@ -49,6 +49,7 @@ import {
   MOUNT_LIMIT,
   OP0,
   PANE,
+  NEVER,
   PATH_TOOLS,
   PREFS0,
   TEXT_EXT,
@@ -56,6 +57,8 @@ import {
   SEARCH0,
   SKILL_DENY,
   SKILL_PATH_TOOLS,
+  isKeep,
+  keepNote,
   SKILL_PROMPT_OFF,
   SWITCHES0,
   TITLE,
@@ -148,6 +151,29 @@ import {
 import type { HookPatch, HooksTable, SectionSeen } from './manage'
 import { drawPane } from './views'
 import type { Actions, Snap } from './views'
+import {
+  WINDOW_ALREADY,
+  WINDOW_NO_SURFACE,
+  WINDOW_OPENED,
+  heldW,
+  noteTree,
+  readHelperLine,
+  serializeTree,
+  startFailure,
+  takeLines,
+  tokenOf,
+  windowFocus,
+  windowOff,
+  windowPage,
+  windowSize,
+  windowStale,
+  windowSuits,
+  windowTable,
+  windowToast,
+  windowWants,
+  windowWish,
+} from './window'
+import type { WindowAct, WindowEvent, WindowWish } from './window'
 
 type E = EngineInterface
 
@@ -179,7 +205,58 @@ async function safe<T>(fn: () => Promise<T>): Promise<T | undefined> {
   }
 }
 
+/**
+ * Every write of Atlas's state: the engine's own `update`, after which the
+ * browser window, if one is open, is due a new drawing. The pane needs no
+ * telling (a write wakes the drawings that read the value), and a hook of
+ * Atlas's own on `state.set` would not do: a write made after a hook has
+ * returned (a scan's, or a press in the window) passes it by.
+ */
+async function update<T>($: E, target: Atom<T>, change: (value: T) => T): Promise<T> {
+  const next = await writeState($, target, change)
+  windowStale()
+  return next as T
+}
+
+/** The engine's `update` reads the value it writes off the source, so each atom is named where it is written. */
+function writeState($: E, target: unknown, change: unknown): Promise<unknown> {
+  switch (target) {
+    case scanA:
+      return engineUpdate($, scanA, change as never)
+    case viewA:
+      return engineUpdate($, viewA, change as never)
+    case searchA:
+      return engineUpdate($, searchA, change as never)
+    case fileA:
+      return engineUpdate($, fileA, change as never)
+    case ctxA:
+      return engineUpdate($, ctxA, change as never)
+    case switchesA:
+      return engineUpdate($, switchesA, change as never)
+    case prefsA:
+      return engineUpdate($, prefsA, change as never)
+    case loadedA:
+      return engineUpdate($, loadedA, change as never)
+    case mergeA:
+      return engineUpdate($, mergeA, change as never)
+    case opA:
+      return engineUpdate($, opA, change as never)
+    case extraA:
+      return engineUpdate($, extraA, change as never)
+    case tickA:
+      return engineUpdate($, tickA, change as never)
+    case trashA:
+      return engineUpdate($, trashA, change as never)
+    case manageA:
+      return engineUpdate($, manageA, change as never)
+    default:
+      return Promise.reject(new Error('atlas: a write to a value register.tsx does not name'))
+  }
+}
+
 function toast($: E, text: string): void {
+  // the window shows it too, while one is listening; the terminal still gets it
+  windowToast(text)
   try {
     $.ui.toast(text)
   } catch {
@@ -188,6 +265,7 @@ function toast($: E, text: string): void {
 }
 
 function focusSoon($: E, key: string): void {
+  windowFocus(key)
   try {
     void $.ui.focus({ requestId: PANE, key }).catch(() => undefined)
   } catch {
@@ -1065,7 +1143,7 @@ async function applyMerge($: E): Promise<void> {
     return problems.length ? problems.join('；') : null
   }
   await update($, mergeA, (): AtlasMerge => MERGE0)
-  await setOp($, `已把 ${name} 合并进 ${basename(target)}，原文件在回收站（${days} 天后自动清空）`, true)
+  await setOp($, `已把 ${name} 合并进 ${basename(target)}，原文件在回收站（${keepNote(days)}）`, true)
   toast($, '已合并')
   void startScan($)
   void loadTrash($)
@@ -1329,8 +1407,9 @@ function asTrashed(out: unknown): { ok: true; items: TrashMeta[] } | { ok: false
 }
 
 async function daysOf($: E): Promise<string> {
+  // this session's pick at a delete, else this machine's default from the 回收站 page, else the plugin's option
   const v = await read($, viewA)
-  return v.trashDays || config.trashDays
+  return v.trashDays || (await read($, prefsA)).trashDays || config.trashDays
 }
 
 function routeIsGone(route: AtlasRoute | undefined, paths: readonly string[]): boolean {
@@ -1375,8 +1454,8 @@ async function trashTargets($: E, paths: string[], label: string, kind?: string)
   if (routeIsGone(v.stack[v.stack.length - 1], paths)) {
     await update($, viewA, (x): AtlasView => ({ ...x, stack: x.stack.slice(0, -1) }))
   }
-  await setOp($, `已移进回收站：${label}（${days} 天后自动清空）`, true)
-  toast($, `已删除 ${label}，${days} 天内可在回收站恢复`)
+  await setOp($, `已移进回收站：${label}（${keepNote(days)}）`, true)
+  toast($, days === NEVER ? `已删除 ${label}，在回收站里一直留着，可以恢复` : `已删除 ${label}，${days} 天内可在回收站恢复`)
   void startScan($)
   void loadTrash($)
 }
@@ -1434,11 +1513,35 @@ async function purgeNow($: E, id: string): Promise<void> {
   await loadTrash($)
 }
 
+/** Empties the whole trash, whatever each item's expiry says. */
+async function purgeAll($: E): Promise<void> {
+  await setOp($, '正在清空回收站…', false)
+  const out = await atlasJson($, ['purge', '--all'])
+  await update($, viewA, (v): AtlasView => ({ ...v, pending: null }))
+  const refused = typeof out === 'string' ? out : refusedOf(out)
+  const purged = typeof out === 'string' ? [] : (out as { purged?: unknown }).purged
+  const n = Array.isArray(purged) ? purged.length : 0
+  const freed = typeof out === 'string' ? 0 : Number((out as { freedBytes?: unknown }).freedBytes ?? 0)
+  if (refused && n) await setOp($, `清空了 ${n} 项，有的没清掉：${refused}`, false)
+  else if (refused) await setOp($, '', false, `没有清空：${refused}`)
+  else await setOp($, `回收站已清空：永久删除 ${n} 项，释放 ${(freed / 1024 / 1024).toFixed(1)} MB`, false)
+  await loadTrash($)
+}
+
+/** This machine's keep period for what is deleted from now on; what is already in the trash keeps its own. */
+async function setTrashDefault($: E, days: string): Promise<void> {
+  if (!isKeep(days)) return
+  await savePrefs($, p => ({ ...p, trashDays: days }))
+  // a pick made at a delete earlier in this session no longer stands over the new default
+  await update($, viewA, (v): AtlasView => ({ ...v, trashDays: '' }))
+  toast($, days === NEVER ? '以后删除的东西一直保留，只手动清空' : `以后删除的东西保留 ${days} 天`)
+}
+
 async function setExpiry($: E, id: string, days: string): Promise<void> {
   const out = await atlasJson($, ['set-expiry', id, '--days', days])
   const refused = typeof out === 'string' ? out : refusedOf(out)
   if (refused) await setOp($, '', false, `没有改成：${refused}`)
-  else toast($, `改成 ${days} 天后清空`)
+  else toast($, `改成${keepNote(days)}`)
   await loadTrash($)
 }
 
@@ -1932,6 +2035,8 @@ function actionsFor($: E): Actions {
     restore: ids => void restoreIds($, ids),
     purgeNow: id => void purgeNow($, id),
     setExpiry: (id, days) => void setExpiry($, id, days),
+    purgeAll: () => void purgeAll($),
+    trashDefault: days => told($, setTrashDefault($, days)),
     archiveMemory: (path, label) => void archiveMemory($, path, label),
     setArchived: (kind, id, on) => told($, setArchived($, kind, id, on)),
     loadTrash: () => void loadTrash($),
@@ -1989,9 +2094,303 @@ async function snapshot($: E, surface: RenderSurface, editorModel: string): Prom
     trash: await read($, trashA),
     manage: await read($, manageA),
     editorModel,
-    trashDays: config.trashDays,
+    trashDays: (await read($, prefsA)).trashDays || config.trashDays,
     act: actionsFor($),
   }
+}
+
+// ---------- the browser window ----------
+//
+// `/atlas` in a terminal opens the pane as a page in a browser window of its
+// own. bin/atlas_window.py serves the page (web/) on a loopback port and is
+// the only thing the page talks to. The pane is drawn here as the desktop app
+// draws it, into a table of plain nodes (window.ts), and pushed to the helper
+// as JSON; what the person does in the page comes back on the helper's
+// standard output and runs the handler the drawing held under that key.
+
+/** How long the helper has to say it is listening. */
+const WINDOW_READY_MS = 10_000
+/** A press writes several values one after another: the drawing waits this long, and draws once. */
+const WINDOW_SETTLE_MS = 25
+/** A second bare /atlas this soon after a window was asked for finds it still opening. */
+const WINDOW_OPENING_MS = 4000
+
+type WindowStarted = { port: number } | { error: string }
+
+/** A wait on the engine's clock: a hooks module has no timers of its own. */
+function pause($: E, ms: number): Promise<void> {
+  return new Promise(resolve => {
+    try {
+      $.clock.after(ms, () => resolve())
+    } catch {
+      resolve()
+    }
+  })
+}
+
+function windowLog($: E, text: string): void {
+  try {
+    $.ui.log(`atlas window: ${text}`, { to: 'debug' })
+  } catch {
+    // the debug log is a nicety
+  }
+}
+
+/** One request to the helper, with the mod's token. */
+async function windowHttp($: E, method: 'GET' | 'POST', path: string, body?: string): Promise<{ ok: boolean; status: number; doc: Record<string, unknown> }> {
+  const res = await $.http.fetch(`http://127.0.0.1:${heldW.port}${path}`, {
+    method,
+    headers: body === undefined ? { 'X-Atlas-Token': heldW.token } : { 'X-Atlas-Token': heldW.token, 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body }),
+  })
+  const doc = parseJson(res.text)
+  return { ok: res.ok, status: res.status, doc: typeof doc === 'object' && doc !== null ? (doc as Record<string, unknown>) : {} }
+}
+
+/** Starts the helper, once per load, and waits until it listens: null, or why it does not. */
+function startWindow($: E): Promise<string | null> {
+  if (heldW.status === 'ready') return Promise.resolve(null)
+  if (!heldW.starting) {
+    heldW.starting = bootWindow($).finally(() => {
+      heldW.starting = null
+    })
+  }
+  return heldW.starting
+}
+
+async function bootWindow($: E): Promise<string | null> {
+  const ctx = await ensureCtx($)
+  const root = slashes($.plugin.root)
+  const python = ctx.win ? await windowsPython($, ctx.home) : '/usr/bin/python3'
+  // the helper opens no window by itself: each one is asked for (POST /open), so its answer can be told
+  const argv = [python, '-I', `${root}/bin/atlas_window.py`, '--web', `${root}/web`, '--no-open']
+  // the token goes in on standard input: a command line can be read by every process on the machine
+  const token = tokenOf(crypto.getRandomValues(new Uint8Array(32)))
+  windowOff()
+  const gen = ++heldW.gen
+  heldW.status = 'starting'
+  heldW.token = token
+  const said = await new Promise<WindowStarted>(resolve => {
+    let timer: { cancel: () => void } | null = null
+    const settle = (r: WindowStarted) => {
+      try {
+        timer?.cancel()
+      } catch {
+        // a timer that cannot be stopped fires into a promise already settled
+      }
+      resolve(r)
+    }
+    try {
+      timer = $.clock.after(WINDOW_READY_MS, () => settle({ error: `窗口的服务没能启动：等了 ${WINDOW_READY_MS / 1000} 秒，${python} 还没有回话。` }))
+    } catch {
+      // no clock: no time limit
+    }
+    void windowHost($, gen, argv, token, python, settle)
+  })
+  if ('error' in said || heldW.gen !== gen) {
+    if (heldW.gen === gen) {
+      const stop = heldW.stop
+      windowOff()
+      heldW.gen++
+      stop?.()
+    }
+    return 'error' in said ? said.error : '窗口的服务被另一次启动顶掉了。'
+  }
+  heldW.port = said.port
+  heldW.status = 'ready'
+  void windowDraws($, gen)
+  return null
+}
+
+/**
+ * The helper's life: runs it, reads what it says a line at a time, and ends
+ * with it. Leaving the loop is what stops the helper, so this runs on after
+ * the hook that started it has returned, until the helper exits or the module
+ * is unloaded.
+ */
+async function windowHost($: E, gen: number, argv: readonly string[], token: string, python: string, started: (r: WindowStarted) => void): Promise<void> {
+  let rest = ''
+  let errors = ''
+  let why = ''
+  try {
+    const child = $.process.spawn({ argv: [...argv], input: `${token}\n` })
+    if (heldW.gen === gen) {
+      heldW.stop = () => {
+        try {
+          void child.return({ code: null, signal: null }).catch(() => undefined)
+        } catch {
+          // leaving the loop stops it too
+        }
+      }
+    }
+    for await (const piece of child) {
+      if (heldW.gen !== gen) break
+      if (piece.stream === 'stderr') {
+        errors = (errors + piece.text).slice(-800)
+        continue
+      }
+      const cut = takeLines(rest, piece.text)
+      rest = cut.rest
+      for (const line of cut.lines) {
+        const said = readHelperLine(line)
+        if (said.kind === 'ready') started({ port: said.port })
+        else if (said.kind === 'failed') why = said.error
+        else if (said.kind === 'page') windowPage(said.open)
+        else if (said.kind === 'act') windowAct($, said.act)
+      }
+    }
+  } catch (err) {
+    why = why || errText(err)
+  }
+  // the helper is gone: a window still open says so itself, and the next /atlas starts another
+  if (heldW.gen === gen) windowOff()
+  started({ error: startFailure(python, why, errors) })
+}
+
+/** Runs what a page did: the handler the last drawing held under that key, or the board's post. Unknown keys do nothing. */
+function windowAct($: E, act: WindowAct): void {
+  try {
+    if (act.kind === 'hello' || act.kind === 'resize') {
+      heldW.width = act.width
+      heldW.height = act.height
+      // a page that says hello is listening, whether or not the helper has said so yet
+      if (act.kind === 'hello') windowPage(true)
+      else windowStale()
+      return
+    }
+    if (act.kind === 'board') {
+      const post = asPost(act.data)
+      if (post) told($, handleBoard($, post, config.editorModel))
+      return
+    }
+    const mine = heldW.handlers.get(act.key)
+    if (!mine) return
+    const e: WindowEvent = { plugin: 'atlas', element: act.key, component: 'Pane', requestId: PANE, surface: heldW.surface }
+    if (act.kind === 'press') mine.onPress?.(e)
+    else if (act.kind === 'select') mine.onSelect?.(act.value, e)
+    else if (act.kind === 'input') mine.onInput?.(act.value, e)
+    else mine.onSubmit?.(act.value, e)
+  } catch (err) {
+    toast($, `没有完成：${errText(err)}`)
+  }
+}
+
+/** The pane as the desktop app draws it, at the window's size, as JSON; its handlers are kept for the page's acts. */
+async function drawWindow($: E): Promise<string> {
+  let drawing
+  try {
+    const snap = await snapshot($, 'desktop', config.editorModel)
+    drawing = serializeTree(drawPane(snap, windowSize(heldW.width, heldW.height), windowTable))
+  } catch (err) {
+    drawing = { tree: noteTree(`Atlas 没能画出这一页：${errText(err)}`), handlers: new Map(), problems: [] }
+  }
+  heldW.handlers = drawing.handlers
+  for (const problem of drawing.problems) {
+    if (heldW.said.has(problem)) continue
+    heldW.said.add(problem)
+    windowLog($, problem)
+  }
+  return JSON.stringify(drawing.tree)
+}
+
+/** Sends the helper what is due: a new drawing when something changed, the toasts raised since, the key to focus. */
+async function pushWindow($: E): Promise<void> {
+  const parts: string[] = []
+  let tree: string | null = null
+  if (heldW.stale) {
+    heldW.stale = false
+    tree = await drawWindow($)
+    if (tree === heldW.lastTree) tree = null
+    else parts.push(`"tree":${tree}`)
+  }
+  const toasts = heldW.toasts.splice(0)
+  const focus = heldW.focus
+  heldW.focus = null
+  if (toasts.length > 0) parts.push(`"toasts":${JSON.stringify(toasts)}`)
+  if (focus !== null) parts.push(`"focus":${JSON.stringify(focus)}`)
+  if (parts.length === 0) return
+  const cwd = (await read($, ctxA)).cwd
+  parts.push(`"title":${JSON.stringify(cwd ? `Atlas · ${basename(cwd)}` : 'Atlas')}`)
+  const res = await windowHttp($, 'POST', '/push', `{${parts.join(',')}}`)
+  if (!res.ok) {
+    // the drawing did not arrive: it is due again
+    if (tree !== null) heldW.stale = true
+    throw new Error(`窗口的服务回答 ${res.status}`)
+  }
+  if (tree !== null) heldW.lastTree = tree
+}
+
+/**
+ * Draws for the window while a page is listening and something has changed,
+ * and waits on a plain promise otherwise (`windowStale`, a toast or a page
+ * arriving wakes it). It runs on after the hook that started it, beside the
+ * helper's loop, and ends with the helper.
+ */
+async function windowDraws($: E, gen: number): Promise<void> {
+  let failures = 0
+  while (heldW.gen === gen && heldW.status === 'ready') {
+    if (!windowWants()) {
+      await new Promise<void>(resolve => {
+        heldW.wake = resolve
+      })
+      continue
+    }
+    await pause($, WINDOW_SETTLE_MS)
+    if (heldW.gen !== gen || heldW.status !== 'ready') break
+    try {
+      await pushWindow($)
+      failures = 0
+    } catch (err) {
+      windowLog($, `没能把画面送到窗口：${errText(err)}`)
+      // not again and again: after a few tries the drawing waits for the next change
+      if (++failures >= 3) {
+        heldW.stale = false
+        failures = 0
+      }
+    }
+  }
+}
+
+/** How many pages are looking right now, asked of the helper: a window closed a moment ago is not one. */
+async function windowPages($: E): Promise<number> {
+  const res = await safe(() => windowHttp($, 'GET', '/status'))
+  return res?.ok && typeof res.doc.pages === 'number' ? res.doc.pages : 0
+}
+
+/**
+ * `/atlas` as a browser window: `text` says what happened, in a line. `note`
+ * instead means the embedded pane is to be opened as before, with what to say
+ * first when a window was meant and could not be had.
+ */
+async function atlasWindow($: E, wish: WindowWish): Promise<{ text: string } | { note: string | null }> {
+  if (wish === 'pane') return { note: null }
+  const surfaces = await safe(() => $.session.surfaces())
+  if (wish === 'auto' && !windowSuits(surfaces)) return { note: null }
+  // a run that draws nowhere (claude -p) starts nothing and opens nothing, whatever was typed
+  if (surfaces && surfaces.length === 0) return { text: WINDOW_NO_SURFACE }
+  heldW.surface = surfaces?.[0] ?? 'terminal'
+  const failed = await startWindow($)
+  if (failed) return wish === 'auto' ? { note: `${failed}先打开了嵌在终端里的面板。` } : { text: failed }
+  if (!held.index && !held.scanning) void startScan($)
+  const now = (await safe(() => $.clock.now())) ?? Date.now()
+  if (wish === 'auto' && (now - heldW.openedAtMs < WINDOW_OPENING_MS || (await windowPages($)) > 0)) return { text: WINDOW_ALREADY }
+  const res = await safe(() => windowHttp($, 'POST', '/open', '{}'))
+  if (res?.ok && res.doc.opened === true) {
+    heldW.openedAtMs = now
+    return { text: WINDOW_OPENED }
+  }
+  const why =
+    res?.doc.how === 'suppressed'
+      ? 'ATLAS_WINDOW_NO_OPEN=1 关掉了自动打开'
+      : typeof res?.doc.error === 'string' && res.doc.error
+        ? res.doc.error
+        : res
+          ? `窗口的服务回答 ${res.status}`
+          : '连不上窗口的服务'
+  // the address the window would have opened on: good for one page and two minutes, so it can be opened by hand
+  const url = typeof res?.doc.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\//.test(res.doc.url) ? res.doc.url : ''
+  const text = `没能打开浏览器窗口：${why}。${url ? `可以自己在浏览器里打开这个地址（两分钟内有效，只能用一次）：${url}` : ''}`
+  return wish === 'auto' ? { note: `${text}${url ? '\n' : ''}先打开了嵌在终端里的面板。` } : { text }
 }
 
 // ---------- hooks ----------
@@ -1999,10 +2398,14 @@ async function snapshot($: E, surface: RenderSurface, editorModel: string): Prom
 export const register: Register = (on, options) => {
   const editorModel = typeof options.editorModel === 'string' && options.editorModel ? options.editorModel : 'sonnet'
   config.editorModel = editorModel
-  config.trashDays = typeof options.trashDays === 'string' && /^\d+$/.test(options.trashDays) ? options.trashDays : '7'
+  config.trashDays = isKeep(options.trashDays) ? options.trashDays : '7'
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'atlas', description: '打开 Atlas 面板：记忆、CLAUDE.md、会话、Skills、提示词、工具与 Hooks' })
+    await $.command.register({
+      name: 'atlas',
+      description: '打开 Atlas 面板：记忆、CLAUDE.md、会话、Skills、提示词、工具与 Hooks（终端里开成浏览器窗口）',
+      argumentHint: '[window|pane]',
+    })
     try {
       await seed($, e.cwd)
     } catch (err) {
@@ -2020,17 +2423,22 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'atlas' }, async $ => {
+  on('command.run', { command: 'atlas' }, async ($, e) => {
+    // `/atlas window` and `/atlas pane` say which; a bare `/atlas` is the window where only a terminal draws
+    // the session, and the pane, as it always was, everywhere else
+    const windowed = await atlasWindow($, windowWish(String(e.args ?? ''))).catch((err: unknown) => ({ note: `没能打开浏览器窗口：${errText(err)}。先打开了嵌在终端里的面板。` }))
+    if ('text' in windowed) return { text: windowed.text }
+    const lead = windowed.note ? `${windowed.note}\n` : ''
     const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
     if (opened.isPlaced) {
       if (!held.index && !held.scanning) void startScan($)
-      return { text: '已打开 Atlas 面板。' }
+      return { text: `${lead}已打开 Atlas 面板。` }
     }
     // Not drawn now: the pane stays open, and a surface that attaches later draws it (session.attach
     // below starts its scan). Closing it here is what kept it from ever showing in a session whose
     // page had not attached yet.
     if (!held.index) await startScan($)
-    return { text: summary(opened.reason) }
+    return { text: lead + summary(opened.reason) }
   })
 
   on('session.attach', async ($, e, next) => {

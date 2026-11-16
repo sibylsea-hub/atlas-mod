@@ -5,7 +5,7 @@ Usage (see docs/contract.md, the only interface shared with the pane):
   atlas.py index  [--claude-dir DIR] [--cache FILE] [--current-cwd PATH]
   atlas.py search QUERY [--claude-dir DIR] [--limit N]
   atlas.py trash PATH... [--days N] [--kind KIND] [--label TEXT] [--protect-session ID]
-  atlas.py restore ID... | purge [--dry-run] [--now ID...] | trash-list | set-expiry ID --days N
+  atlas.py restore ID... | purge [--dry-run] [--now ID... | --all] | trash-list | set-expiry ID --days N
   atlas.py archive-memory PATH --project-label LABEL
   atlas.py move SRC DEST_DIR | os-trash PATH | reveal PATH | open PATH [--edit]
 
@@ -66,6 +66,8 @@ SCAN_SKIP_WINDOWS = ("AppData", ".git", "node_modules", ".cache")
 TRASH_DIR = "atlas-trash"
 DAY_MS = 86400000
 DEFAULT_TRASH_DAYS = 30
+# `--days never`: no expiry; the item stays until it is emptied by hand
+NEVER = "never"
 
 SEVERITY_RANK = {"error": 0, "warn": 1, "info": 2}
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
@@ -2879,7 +2881,8 @@ def _trash_one(loc, cls, parts, ctx, days, kind, label):
         "pathClass": cls,
         "label": label or pbasename(parts[0]),
         "deletedAtMs": now,
-        "expiresAtMs": now + days * DAY_MS,
+        # None: kept until someone empties it by hand; a purge of what has expired leaves it
+        "expiresAtMs": None if days is None else now + days * DAY_MS,
         "sizeBytes": size,
         "parts": [],
         "indexPath": ip if removed else None,
@@ -2910,10 +2913,13 @@ def _trash_one(loc, cls, parts, ctx, days, kind, label):
 
 
 def _parse_days(days):
+    """How long an item is kept, in days; None for `never`: kept until it is emptied by hand."""
+    if isinstance(days, str) and days.strip().lower() == NEVER:
+        return None
     try:
         d = int(days)
     except (TypeError, ValueError):
-        raise Refused("--days 必须是整数")
+        raise Refused("--days 必须是整数，或者 never")
     if d < 0 or d > 3650:
         raise Refused("--days 必须在 0 到 3650 之间")
     return d
@@ -3027,7 +3033,7 @@ def _remove_item(root, item_id):
     os.rmdir(item)
 
 
-def cmd_purge(claude_dir, dry_run, now_ids):
+def cmd_purge(claude_dir, dry_run, now_ids, everything=False):
     root = trash_root_of(claude_dir)
     items = _list_trash(root) if os.path.isdir(root) else []
     by_id = dict((m["id"], m) for m in items)
@@ -3041,8 +3047,11 @@ def cmd_purge(claude_dir, dry_run, now_ids):
                     targets.append(by_id[i])
             else:
                 refused.append({"id": i, "reason": "回收站里没有这个 id"})
+    elif everything:
+        targets = list(items)
     else:
-        targets = [m for m in items if int(m.get("expiresAtMs") or 0) <= now]
+        # what has expired; an item whose expiry is null is kept until it is emptied by hand
+        targets = [m for m in items if "expiresAtMs" not in m or (m["expiresAtMs"] is not None and int(m["expiresAtMs"] or 0) <= now)]
     purged, freed = [], 0
     for m in targets:
         if not dry_run:
@@ -3065,7 +3074,7 @@ def cmd_set_expiry(claude_dir, item_id, days):
             meta = _read_meta(item)
         except (OSError, ValueError) as exc:
             raise Refused("meta.json 读取失败：%s" % exc)
-        meta["expiresAtMs"] = now_ms() + d * DAY_MS
+        meta["expiresAtMs"] = None if d is None else now_ms() + d * DAY_MS
         _write_json_atomic(pjoin(item, "meta.json"), meta)
         return {"updated": meta, "refused": []}
     except Refused as exc:
@@ -3412,6 +3421,7 @@ def _parser():
     p = mk("purge")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--now", nargs="+")
+    p.add_argument("--all", action="store_true")
     mk("trash-list")
     p = mk("set-expiry")
     p.add_argument("id")
@@ -3464,7 +3474,7 @@ def main(argv=None):
             elif args.cmd == "restore":
                 doc = cmd_restore(claude_dir, args.ids)
             elif args.cmd == "purge":
-                doc = cmd_purge(claude_dir, args.dry_run, args.now)
+                doc = cmd_purge(claude_dir, args.dry_run, args.now, args.all)
             elif args.cmd == "trash-list":
                 doc = cmd_trash_list(claude_dir)
             elif args.cmd == "set-expiry":

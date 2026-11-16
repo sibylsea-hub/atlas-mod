@@ -1165,6 +1165,43 @@ class TrashTests(unittest.TestCase):
         self.assertEqual([m["id"] for m in self.cli("purge")["purged"]], [t30["id"]])
         self.assertEqual(self.items(), [])
 
+    def test_never_expires_until_emptied_by_hand(self):
+        P = self.P
+        kept = self.cli("trash", J(P["mem_a"], "orphan.md"), "--days", "never")["trashed"][0]
+        self.assertIsNone(kept["expiresAtMs"])
+        due = self.cli("trash", J(P["mem_a"], "b.md"), "--days", "0")["trashed"][0]
+        listed = dict((m["id"], m) for m in self.cli("trash-list")["items"])
+        self.assertIsNone(listed[kept["id"]]["expiresAtMs"])
+        # a purge of what has expired leaves it, however often it runs
+        for _ in range(2):
+            out = self.cli("purge")
+            self.assertNotIn(kept["id"], [m["id"] for m in out["purged"]])
+        self.assertEqual(self.items(), [kept["id"]])
+        self.assertNotIn(due["id"], self.items())
+        # its expiry can be given and taken away again
+        upd = self.cli("set-expiry", kept["id"], "--days", "7")
+        self.assertGreater(upd["updated"]["expiresAtMs"], atlas.now_ms())
+        self.assertIsNone(self.cli("set-expiry", kept["id"], "--days", "Never")["updated"]["expiresAtMs"])
+        self.assertEqual(self.cli("purge")["purged"], [])
+        # and it still comes back whole
+        self.assertEqual(self.cli("restore", kept["id"])["refused"], [])
+        self.assertTrue(os.path.exists(J(P["mem_a"], "orphan.md")))
+        bad = self.cli("trash", J(P["mem_a"], "a.md"), "--days", "sometimes")
+        self.assertEqual((bad["trashed"], len(bad["refused"])), ([], 1))
+
+    def test_purge_all_empties_whatever_the_expiry(self):
+        P = self.P
+        ids = [self.cli("trash", J(P["mem_a"], name), "--days", days)["trashed"][0]["id"]
+               for name, days in (("orphan.md", "never"), ("b.md", "30"), ("a.md", "0"))]
+        dry = self.cli("purge", "--all", "--dry-run")
+        self.assertEqual((sorted(m["id"] for m in dry["purged"]), dry["keptCount"], dry["dryRun"]), (sorted(ids), 0, True))
+        self.assertEqual(sorted(self.items()), sorted(ids))
+        real = self.cli("purge", "--all")
+        self.assertEqual((sorted(m["id"] for m in real["purged"]), real["keptCount"], real["refused"]), (sorted(ids), 0, []))
+        self.assertGreater(real["freedBytes"], 0)
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.cli("purge", "--all")["purged"], [])
+
     def test_archive_memory_never_overwrites(self):
         P = self.P
         b_md = J(P["mem_a"], "b.md")

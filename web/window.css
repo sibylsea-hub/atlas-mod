@@ -1,0 +1,705 @@
+/* atlas: the browser window's page. It draws the pane as the desktop app
+   does, near enough: every colour of a skin arrives with the drawing and is
+   set from the script; what is here is the page's own (the type, the theme's
+   colours for the keys a drawing names, the look of a button, a field, a
+   board), light and dark by the system's setting. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #faf9f5;
+  --text: #1f1e1d;
+  --dim: #6b6a64;
+  --subtle: #dcdad0;
+  --field: #ffffff;
+  --field-edge: #c9c6ba;
+  --btn: #ffffff;
+  --btn-edge: #cfccc0;
+  --btn-hover: #f1efe8;
+  --primary: #1f1e1d;
+  --primary-text: #ffffff;
+  --primary-edge: #1f1e1d;
+  --hover: rgba(31, 30, 29, 0.07);
+  --focus: #2c6fdf;
+  --error: #b3261e;
+  --success: #1c7a3d;
+  --warning: #8f5f00;
+  --suggestion: #2c6fdf;
+  --claude: #c2603c;
+  --code-bg: #f0eee6;
+  --added: #d8f0dc;
+  --removed: #fadcd9;
+  --toast: #1f1e1d;
+  --toast-text: #ffffff;
+  --shade: rgba(31, 30, 29, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #262624;
+    --text: #f0eee6;
+    --dim: #a9a69c;
+    --subtle: #4a4944;
+    --field: #1f1e1d;
+    --field-edge: #5c5a53;
+    --btn: #33322f;
+    --btn-edge: #5c5a53;
+    --btn-hover: #3e3d39;
+    /* the chosen one stays the dark one: a skin's own buttons are pale on any page */
+    --primary: #0e0e0d;
+    --primary-text: #ffffff;
+    --primary-edge: #f0eee6;
+    --hover: rgba(240, 238, 230, 0.1);
+    --focus: #7fb0ff;
+    --error: #ff8f85;
+    --success: #7ed492;
+    --warning: #e6b450;
+    --suggestion: #7fb0ff;
+    --claude: #e08a66;
+    --code-bg: #1f1e1d;
+    --added: #1e3d27;
+    --removed: #4a2422;
+    --toast: #f0eee6;
+    --toast-text: #1f1e1d;
+    --shade: rgba(0, 0, 0, 0.6);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+#root {
+  padding: 16px 16px 72px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.wait {
+  color: var(--dim);
+  margin: 24px 0;
+}
+
+/* ---- Box and Text ---- */
+
+.box {
+  display: flex;
+  flex-direction: row;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Down a page a button, a menu or a picture keeps its own width (a row, a strip or a paragraph takes the
+   page's), and along a row a button keeps its own height, unless the drawing says how the box lines things up. */
+.box.column:not(.aligned) > .btn,
+.box.column:not(.aligned) > .box.pill,
+.box.column:not(.aligned) > .field.select,
+.box.column:not(.aligned) > .svg {
+  align-self: flex-start;
+}
+
+.box:not(.column):not(.aligned) > .btn,
+.box:not(.column):not(.aligned) > .box.pill,
+.box:not(.column):not(.aligned) > .field,
+.box:not(.column):not(.aligned) > .text {
+  align-self: center;
+}
+
+.box.bordered {
+  border: 1px solid var(--subtle);
+  padding: 12px;
+}
+
+.box.b-round {
+  border-radius: 9px;
+}
+
+.box.b-single {
+  border-radius: 3px;
+}
+
+.box.b-double {
+  border-style: double;
+  border-width: 3px;
+  border-radius: 3px;
+}
+
+.box.b-dashed {
+  border-style: dashed;
+  border-radius: 9px;
+}
+
+.box.b-bold {
+  border-width: 2px;
+  border-radius: 3px;
+}
+
+/* a small bordered box holding one plain button is the button: the whole of it presses */
+.box.pill {
+  padding: 0;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.box.pill > .btn.plain {
+  flex: 1 1 auto;
+  padding: 4px 11px;
+  border-radius: 0;
+  text-align: center;
+}
+
+.box.pill:hover {
+  filter: brightness(0.96);
+}
+
+.text {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.text.cut {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.text.dim,
+.btn.dim {
+  color: var(--dim);
+}
+
+.text.filled {
+  border-radius: 5px;
+  padding: 1px 2px;
+  white-space: pre;
+}
+
+.text.mono {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* ---- Button ---- */
+
+.btn {
+  font: inherit;
+  color: var(--text);
+  background: var(--btn);
+  border: 1px solid var(--btn-edge);
+  border-radius: 8px;
+  padding: 4px 12px;
+  margin: 0;
+  cursor: pointer;
+  text-align: center;
+  max-width: 100%;
+  flex: 0 0 auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.btn:hover {
+  background: var(--btn-hover);
+}
+
+.btn.primary {
+  background: var(--primary);
+  border-color: var(--primary-edge);
+  color: var(--primary-text);
+  font-weight: 600;
+}
+
+.btn.primary:hover {
+  filter: brightness(1.25);
+}
+
+.btn.plain {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 1px 4px;
+  margin: 0 -4px;
+  text-align: left;
+  color: inherit;
+  flex: 0 1 auto;
+}
+
+.box.pill > .btn.plain {
+  margin: 0;
+}
+
+.btn.plain:hover {
+  background: var(--hover);
+}
+
+/* a plain button that is only its words (not a row's title, not a skin's button) is underlined, to be seen as one */
+.btn.plain.words {
+  text-decoration: underline;
+  text-decoration-color: var(--field-edge);
+  text-underline-offset: 3px;
+}
+
+.btn.plain.dim {
+  color: var(--dim);
+}
+
+.btn.plain.dim:hover {
+  color: var(--text);
+}
+
+.btn.inert {
+  cursor: default;
+}
+
+.btn:focus-visible,
+.field input:focus-visible,
+.field textarea:focus-visible,
+.field select:focus-visible,
+.card:focus-visible,
+.col-head:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* ---- Input and Select ---- */
+
+.field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 100%;
+}
+
+.field.area {
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.field.select {
+  flex: 0 1 auto;
+}
+
+.field .lbl {
+  color: var(--dim);
+  white-space: pre;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.field input,
+.field textarea,
+.field select {
+  font: inherit;
+  color: var(--text);
+  background: var(--field);
+  border: 1px solid var(--field-edge);
+  border-radius: 7px;
+  padding: 4px 8px;
+  min-width: 0;
+}
+
+.field input {
+  flex: 1 1 140px;
+}
+
+.field textarea {
+  flex: 1 1 100%;
+  width: 100%;
+  resize: vertical;
+  line-height: 1.45;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei', monospace;
+  font-size: 13px;
+}
+
+.field select {
+  flex: 0 1 auto;
+  max-width: 100%;
+  padding-right: 4px;
+}
+
+.field input::placeholder,
+.field textarea::placeholder {
+  color: var(--dim);
+  opacity: 0.8;
+}
+
+/* ---- Svg, Code, Markdown ---- */
+
+.svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  flex: 0 0 auto;
+}
+
+.code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--code-bg);
+  border-radius: 8px;
+  font: 12.5px/1.5 ui-monospace, 'SF Mono', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei', monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
+.code .add {
+  background: var(--added);
+  display: block;
+}
+
+.code .del {
+  background: var(--removed);
+  display: block;
+}
+
+.code .hunk {
+  color: var(--dim);
+  display: block;
+}
+
+.md {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.md > * {
+  margin: 0 0 9px;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  line-height: 1.3;
+  margin-top: 16px;
+}
+
+.md h1 {
+  font-size: 19px;
+}
+
+.md h2 {
+  font-size: 17px;
+}
+
+.md h3,
+.md h4 {
+  font-size: 15px;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md ul,
+.md ol {
+  padding-left: 22px;
+}
+
+.md li {
+  margin: 2px 0;
+}
+
+.md code {
+  font: 12.5px ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.md pre {
+  background: var(--code-bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  font: 12.5px/1.5 ui-monospace, 'SF Mono', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei', monospace;
+}
+
+.md p,
+.md blockquote {
+  white-space: pre-line;
+}
+
+.md blockquote {
+  border-left: 3px solid var(--subtle);
+  padding-left: 10px;
+  color: var(--dim);
+}
+
+.md li.in1 {
+  margin-left: 18px;
+}
+
+.md li.in2 {
+  margin-left: 36px;
+}
+
+.md li.in3 {
+  margin-left: 54px;
+}
+
+.md li.in4 {
+  margin-left: 72px;
+}
+
+.md hr {
+  border: none;
+  border-top: 1px solid var(--subtle);
+}
+
+.md.dim {
+  color: var(--dim);
+}
+
+a.link {
+  color: var(--suggestion);
+}
+
+/* ---- the board ---- */
+
+/* columns side by side, as many as the page is wide for; the rest go on under them, so none is ever out of
+   sight when a card is in hand */
+.board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  width: 100%;
+  padding: 2px;
+  align-items: start;
+  touch-action: pan-y;
+  --ink: var(--text);
+  --ink-soft: var(--dim);
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--subtle);
+  border-radius: 9px;
+  overflow: hidden;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.col.paper {
+  border-color: var(--sheet-head);
+  background: var(--sheet-body);
+}
+
+.col.target {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.col-head {
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  border-bottom: 1px solid var(--subtle);
+  background: none;
+  text-align: left;
+  width: 100%;
+  cursor: default;
+}
+
+.col.paper .col-head {
+  background: var(--sheet-head);
+  border-bottom-color: var(--sheet-head);
+}
+
+.board.armed .col-head {
+  cursor: pointer;
+}
+
+.col-head .count {
+  font-weight: 500;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.col-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  min-height: 44px;
+}
+
+.card {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border: 1px solid var(--subtle);
+  border-radius: 7px;
+  background: var(--field);
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  min-width: 0;
+  width: 100%;
+}
+
+.col.paper .card {
+  background: rgba(255, 255, 255, 0.62);
+  border-color: var(--sheet-head);
+}
+
+.card:hover {
+  filter: brightness(0.97);
+}
+
+.card .name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.card .meta {
+  font-size: 12px;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.card.selected {
+  outline: 2px solid var(--focus);
+  outline-offset: -1px;
+}
+
+.col.paper .card.selected,
+.col.paper .card.onto {
+  background: var(--sheet-head);
+}
+
+.card.onto {
+  outline: 2px dashed var(--focus);
+  outline-offset: -1px;
+}
+
+.card.dragging {
+  opacity: 0.4;
+}
+
+.slot {
+  font-size: 12px;
+  color: var(--ink-soft);
+  padding: 5px 8px;
+  border: 1px dashed var(--subtle);
+  border-radius: 7px;
+}
+
+.col.paper .slot {
+  border-color: var(--sheet-head);
+}
+
+.ghost {
+  position: fixed;
+  z-index: 30;
+  pointer-events: none;
+  background: var(--toast);
+  color: var(--toast-text);
+  border-radius: 7px;
+  padding: 4px 9px;
+  font-size: 13px;
+  max-width: 320px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+body.dragging,
+body.dragging * {
+  cursor: grabbing !important;
+}
+
+/* ---- toasts and the lost-connection overlay ---- */
+
+#toasts {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 40;
+}
+
+.toast {
+  background: var(--toast);
+  color: var(--toast-text);
+  border-radius: 9px;
+  padding: 7px 14px;
+  max-width: min(440px, 90vw);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  overflow-wrap: anywhere;
+}
+
+#lost {
+  position: fixed;
+  inset: 0;
+  background: var(--shade);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 50;
+}
+
+#lost[hidden] {
+  display: none;
+}
+
+.lost-card {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--subtle);
+  border-radius: 12px;
+  padding: 20px 22px;
+  max-width: 400px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+
+.lost-card p {
+  margin: 0 0 12px;
+}
+
+.lost-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.lost-card code {
+  font: 13px ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
