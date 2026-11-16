@@ -79,6 +79,8 @@ TOASTS_KEPT = 20
 MAX_PUSH = 16 << 20
 MAX_ACT = 2 << 20
 MAX_SMALL = 4 << 10
+# how much of a refused request's unread body is read off and dropped before the connection is closed
+DRAIN_MAX = 32 << 20
 
 WINDOW_SIZE = "560,900"
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
@@ -416,7 +418,34 @@ class Handler(BaseHTTPRequestHandler):
             self._head(code, None, 0)
             self.send_header("Connection", "close")
             self.end_headers()
+            self.wfile.flush()
         except OSError:
+            return
+        self.drain()
+
+    def drain(self):
+        """Reads off, and drops, the body a refused POST is still sending, within bounds. A connection
+        closed with bytes unread is reset on Windows, and the sender then sees a broken connection in
+        place of the refusal; nothing read here is kept."""
+        if self.command != "POST" or getattr(self, "body_read", False):
+            return
+        try:
+            declared = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            declared = 0
+        chunked = bool((self.headers.get("Transfer-Encoding") or "").strip())
+        left = DRAIN_MAX if chunked else min(max(declared, 0), DRAIN_MAX)
+        if left <= 0:
+            return
+        try:
+            self.connection.shutdown(socket.SHUT_WR)  # the answer is whole: the sender may read it now
+            self.connection.settimeout(1.5)
+            while left > 0:
+                data = self.rfile.read1(min(65536, left))
+                if not data:
+                    break
+                left -= len(data)
+        except (OSError, ValueError):
             pass
 
     # ---- checks ----
@@ -487,6 +516,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 self.refuse(400)
                 return None
+        # the whole body is in: a refusal from here on has nothing left to read off
+        self.body_read = True
         try:
             doc = json.loads(raw.decode("utf-8"))
         except (ValueError, RecursionError):
@@ -593,6 +624,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST ----
 
     def do_POST(self):
+        self.body_read = False
         asked = self.checked()
         if asked is None:
             return
