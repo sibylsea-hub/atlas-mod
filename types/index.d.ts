@@ -17,6 +17,8 @@ export type AtlasRoute =
   | { kind: 'hooknew'; from?: string }
   /** One kind of message the engine injects into the conversation (a system reminder), by its type. */
   | { kind: 'inject'; type: string; from?: string }
+  /** A stretch of the system prompt outside the sections, by its place in the list last read. */
+  | { kind: 'outside'; index: number; from?: string }
   /** One tool the model is given, by the name the model calls it. */
   | { kind: 'tool'; name: string; from?: string }
   /** The tools of one MCP server, by the server's name as the tools' names spell it. */

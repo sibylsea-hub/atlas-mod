@@ -22,7 +22,7 @@ function maker<P>(type: string): (props: P) => RenderElement {
  * returns, so the pane's views draw into this table exactly as into the
  * desktop's own.
  */
-export const windowTable: Elements['desktop'] = {
+const table = {
   Box: maker('Box'),
   Text: maker('Text'),
   Button: maker('Button'),
@@ -33,7 +33,11 @@ export const windowTable: Elements['desktop'] = {
   Code: maker('Code'),
   Markdown: maker('Markdown'),
   Client: maker('Client'),
+  // newer engines list it among the desktop's elements; the pane draws none, and the page shows nothing for one
+  Progress: maker('Progress'),
 }
+// assigned, not annotated: an engine whose desktop table has no `Progress` takes the same object
+export const windowTable: Elements['desktop'] = table
 
 // ---------- a drawn tree as JSON ----------
 

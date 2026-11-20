@@ -5,6 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import type { Plugin } from 'claude-code/testing'
 
 import type { AtlasManage, AtlasParkedHook, AtlasPromptEdits, AtlasPromptExtra, AtlasSwitches } from '../types'
 import {
@@ -38,6 +39,7 @@ import {
 import type { HooksTable, SectionSeen } from './manage'
 import { levelEdits, levelState, levelsText, levelsWhere, sectionLevelsText } from './manage'
 import { heldM, injectCaution, injectLevelsText, injectName, injectOffOf, recordInject, setInjectOff } from './manage'
+import { isOwnPrompt, outsideName, outsideOf, sectionsMark, splitOutside, systemBlocks } from './manage'
 import { kilo } from './journal-specs'
 import { cleanName, renameLevelsText, renameOf, renameUser, setRename } from './manage'
 import {
@@ -3833,5 +3835,213 @@ both('工具: the page\'s illustration counts what rides in the prompt, and says
   expect(alt).toContain('1 个你改过')
   expect(alt).toContain(`谁的说明最长：Bash ${tokensOf(BASH)}、ToolSearch ${tokensOf(SEARCH)}`)
   expect(alt).toContain('标签：1 个工具关着')
+  await ui.unmount()
+})
+
+// ---------- 提示词: what the system prompt carries outside the sections ----------
+
+const HOST_RULES = 'Your priority is to complete the request while following the rules below.\n\n## Action categories\n\n### Regular\nAnything else may proceed.'
+const BILLING = 'x-anthropic-billing-header: cc_version=0.0.0; cc_entrypoint=test;'
+const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+
+/** A model request as the engine sends it: the sections in two blocks, the engine's lines before and an app's rules after. */
+function requestBody(extra = HOST_RULES): string {
+  return JSON.stringify({
+    model: 'claude-test',
+    system: [
+      { type: 'text', text: BILLING },
+      { type: 'text', text: IDENTITY },
+      { type: 'text', text: `\n${INTRO}\n\n${TONE}`, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: `${ENV}\n\n${extra}` },
+    ],
+    messages: [{ role: 'user', content: 'hello' }],
+  })
+}
+
+describe('manage.ts 段之外', () => {
+  test('systemBlocks reads the text blocks of a model request, and nothing of any other body', () => {
+    expect(systemBlocks(requestBody())).toEqual({ blocks: [BILLING, IDENTITY, `\n${INTRO}\n\n${TONE}`, `${ENV}\n\n${HOST_RULES}`], model: 'claude-test' })
+    expect(systemBlocks(JSON.stringify({ model: 'm', system: 'one string', messages: [] }))).toEqual({ blocks: ['one string'], model: 'm' })
+    expect(systemBlocks(JSON.stringify({ system: ['plain', { type: 'image' }, { text: 7 }, { text: 'kept' }] }))).toEqual({ blocks: ['plain', 'kept'], model: '' })
+    for (const body of ['', '[]', 'not json', '{"system":', JSON.stringify({ messages: [] }), JSON.stringify({ system: [] }), JSON.stringify({ system: 3 }), JSON.stringify(['"system"'])]) {
+      expect(systemBlocks(body), body).toBeNull()
+    }
+  })
+
+  test('outsideOf leaves what no section accounts for, in the order sent, and counts the sections it found', () => {
+    const blocks = systemBlocks(requestBody())?.blocks ?? []
+    const out = outsideOf(blocks, [INTRO, TONE, ENV])
+    expect(out.pieces).toEqual([
+      { text: BILLING, block: 0 },
+      { text: IDENTITY, block: 1 },
+      { text: HOST_RULES, block: 3 },
+    ])
+    expect([out.matched, out.asked]).toEqual([3, 3])
+    // white space between sections is nobody's; a section that is not there is simply not found
+    expect(outsideOf([`${INTRO}\n\n \n${TONE}`], [INTRO, TONE, 'A section that was never sent.'])).toEqual({ pieces: [], matched: 2, asked: 3 })
+    // a short section's words inside a longer one do not split the longer one
+    expect(outsideOf(['Be brief and kind. Always. And then: Be brief and kind.'], ['Be brief and kind. Always.', 'Be brief and kind.']).pieces).toEqual([{ text: 'And then:', block: 0 }])
+    // nothing shared: every block is left whole, and the caller can tell it is another prompt
+    const other = outsideOf(['A subagent prompt.', 'With its own rules.'], [INTRO, TONE, ENV])
+    expect(other).toEqual({ pieces: [{ text: 'A subagent prompt.', block: 0 }, { text: 'With its own rules.', block: 1 }], matched: 0, asked: 3 })
+    expect(isOwnPrompt(other.matched, other.asked)).toBe(false)
+    expect(isOwnPrompt(3, 3) && isOwnPrompt(2, 3) && isOwnPrompt(1, 1)).toBe(true)
+    expect(isOwnPrompt(1, 3) || isOwnPrompt(0, 0) || isOwnPrompt(0, 1)).toBe(false)
+    // sections too short to tell apart from ordinary words are not looked for
+    expect(outsideOf(['ok then'], ['ok'])).toEqual({ pieces: [{ text: 'ok then', block: 0 }], matched: 0, asked: 0 })
+  })
+
+  test('a long stretch is listed by its parts: cut before a heading and around a tag block, never inside a code fence', () => {
+    const pad = (n: number) => 'Words that fill a paragraph out. '.repeat(n).trim()
+    const long = [
+      pad(12),
+      '',
+      'Your priority is to follow the rules below.',
+      '',
+      '## Instruction source boundary',
+      pad(10),
+      '',
+      '## Action categories',
+      '',
+      '### Prohibited (never perform)',
+      pad(6),
+      '',
+      '### Regular',
+      'Anything else.',
+      '',
+      '```',
+      '## not a heading: this is code',
+      '<tag>',
+      '```',
+      '',
+      '<browsers>',
+      pad(4),
+      '</browsers>',
+      '',
+      'A paragraph after a tag block stands by itself.',
+      '',
+      '# Task list',
+      pad(3),
+    ].join('\n')
+    const parts = splitOutside(long)
+    expect(parts.map(outsideName)).toEqual([
+      'Words that fill a paragraph out. Words that fil…',
+      'Instruction source boundary',
+      'Action categories',
+      '<browsers>',
+      'A paragraph after a tag block stands by itself.',
+      'Task list',
+    ])
+    // third-level headings and the fenced lines stay inside their part
+    expect(parts[2]).toContain('### Prohibited (never perform)')
+    expect(parts[2]).toContain('## not a heading: this is code')
+    expect(parts[3]?.endsWith('</browsers>')).toBe(true)
+    // the opening sentence before the first heading is in the first part, with what came before it
+    expect(parts[0]).toContain('Your priority is to follow the rules below.')
+    // nothing is lost or added but the white space between parts
+    expect(parts.join('\n\n').replace(/\s+/g, ' ')).toBe(long.replace(/\s+/g, ' '))
+    // a short stretch stays whole, headings and all; white space alone is nothing
+    expect(splitOutside(HOST_RULES)).toEqual([HOST_RULES])
+    expect(splitOutside(' \n ')).toEqual([])
+    // the list takes the parts in order, each in the block it stood in
+    expect(outsideOf([INTRO, long], [INTRO]).pieces.map(p => [outsideName(p.text), p.block])).toEqual(parts.map(p => [outsideName(p), 1]))
+  })
+
+  test('a piece is named for what it is, else by its first line; the sections have a mark that changes with them', () => {
+    expect(outsideName(BILLING)).toBe('计费标记')
+    expect(outsideName(IDENTITY)).toBe('身份声明')
+    expect(outsideName(HOST_RULES)).toBe(HOST_RULES.slice(0, 47) + '…')
+    expect(outsideName('\n\n## Action categories\nmore')).toBe('Action categories')
+    expect(outsideName('   ')).toBe('（空）')
+    const a = sectionsMark([{ id: 'intro', text: INTRO, scope: 'shared' }, { id: 'tone', text: TONE, scope: 'shared' }])
+    expect(a).toBe(`intro:${INTRO.length}|tone:${TONE.length}`)
+    expect(sectionsMark([{ id: 'intro', text: INTRO, scope: 'shared' }])).not.toBe(a)
+    expect(sectionsMark(null)).toBe('')
+  })
+})
+
+/**
+ * A stand-in for the engine's own sender: the kit raises no request of the engine's, so a plugin
+ * beside Atlas sends them, and Atlas's hook sees them pass as it sees the engine's. `/send <url>
+ * <body>` sends one and answers with what came back.
+ */
+const asEngine: Plugin = {
+  name: 'sender',
+  register: on => {
+    on('command.run', { command: 'send' }, async ($, e) => {
+      const at = e.args.indexOf(' ')
+      const url = at < 0 ? e.args : e.args.slice(0, at)
+      const body = at < 0 ? undefined : e.args.slice(at + 1)
+      const res = await $.http.fetch(url, body === undefined ? {} : { method: 'POST', body: body.startsWith('base64:') ? { base64: body.slice(7) } : body })
+      return { text: res.text }
+    })
+  },
+}
+
+async function send($: Engine, url: string, body?: string): Promise<string> {
+  const out = await $.command.run({ command: 'send', args: body === undefined ? url : `${url} ${body}`, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  return String(out.text ?? '')
+}
+
+const MESSAGES = 'https://api.anthropic.com/v1/messages'
+
+function asBoth(name: string, body: ($: Engine, on: On, surface: Surface) => Promise<void>): void {
+  for (const surface of SURFACES) test(`${name} (${surface})`, { plugins: [asEngine], timeoutMs: 20_000 }, ($, on) => body($, on, surface))
+}
+
+asBoth('提示词: what a request carries outside the sections is listed read-only once one is sent, and the request goes on untouched', async ($, on, surface) => {
+  const sent: unknown[] = []
+  on('http.fetch', ($, e) => {
+    sent.push(e.init?.body)
+    return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
+  })
+  const { ui } = await openPrompt($, on, surface)
+  // before any request: said plainly, with nothing to open
+  expect(await ui.find({ type: 'Text', text: /还没读到：要等引擎真的发出一次请求/ })).toBeDefined()
+  expect(await buttonKeys(ui, 'out:')).toEqual([])
+  // another prompt's request (a subagent's) is passed over
+  const foreign = JSON.stringify({ model: 'claude-test', system: [{ type: 'text', text: 'A subagent prompt with nothing in common.' }], messages: [] })
+  await send($, `${MESSAGES}?beta=true`, foreign)
+  // a request that is not a model request is not read at all
+  await send($, 'https://api.anthropic.com/api/event_logging/v2/batch', requestBody())
+  expect(await buttonKeys(ui, 'out:')).toEqual([])
+  // the session's own: read, listed in the order sent
+  const body = requestBody()
+  await send($, `${MESSAGES}?beta=true`, body)
+  expect(sent).toEqual([foreign, requestBody(), body])
+  expect(await buttonKeys(ui, 'out:')).toEqual(['out:0', 'out:1', 'out:2'])
+  expect(await rowName(ui, surface, 'out:0')).toMatch(/^计费标记/)
+  expect(await rowName(ui, surface, 'out:1')).toMatch(/^身份声明/)
+  expect(await rowName(ui, surface, 'out:2')).toMatch(/^Your priority is to complete the request/)
+  expect(await ui.find({ type: 'Text', text: /关不掉也改不了/ })).toBeDefined()
+  // its page: the text as sent, a copy button, and no switch of any kind
+  await ui.press({ key: 'out:2' })
+  expect(await ui.find({ type: 'Text', text: HOST_RULES })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`第 4 块里 · ${HOST_RULES.length} 字符 · 约 ${approxTokens(HOST_RULES)} tokens · 只读`) })).toBeDefined()
+  expect(await ui.find({ key: 'out-copy' })).toBeDefined()
+  for (const key of ['s-toggle', 's-rewrite', 'inj-toggle', 'scope:section', 'scope:inject']) expect(await ui.find({ key }), key).toBeUndefined()
+  await ui.press({ key: 'back' })
+  // read once: a later request is not parsed again until the page asks
+  await send($, MESSAGES, requestBody('Other rules now.'))
+  expect(await rowName(ui, surface, 'out:2')).toMatch(/^Your priority/)
+  await ui.press({ key: 'p-reload' })
+  await send($, MESSAGES, requestBody('Other rules now.'))
+  expect(await rowName(ui, surface, 'out:2')).toMatch(/^Other rules now\./)
+  await ui.unmount()
+})
+
+asBoth('提示词: a look at a request that cannot be read costs the request nothing', async ($, on, surface) => {
+  const sent: unknown[] = []
+  on('http.fetch', ($, e) => {
+    sent.push(e.init?.body)
+    return { value: { status: 200, ok: true, headers: {}, text: 'answered' } }
+  })
+  const { ui } = await openPrompt($, on, surface)
+  for (const body of ['{"system": broken', 'x', JSON.stringify({ system: 5 })]) expect(await send($, MESSAGES, body)).toBe('answered')
+  // bytes instead of text, and no body at all
+  expect(await send($, MESSAGES, 'base64:AAAA')).toBe('answered')
+  expect(await send($, MESSAGES)).toBe('answered')
+  expect(sent.length).toBe(5)
+  expect(await buttonKeys(ui, 'out:')).toEqual([])
   await ui.unmount()
 })

@@ -71,6 +71,140 @@ export const heldM = {
   tools: new Map<string, ToolSeen>(),
   /** The tools `$.tool.list()` last named; null until asked. */
   toolList: null as ToolListed[] | null,
+  /** What the system prompt carried beside the sections, in the last request read; null until one is. */
+  outside: null as OutsideSeen | null,
+  /** How many more requests may be read for it: a request's body is parsed only while this is above zero. */
+  outsideTries: 0,
+  /** The sections `outside` was last looked for under: their ids and lengths, to tell when they changed. */
+  outsideUnder: '',
+}
+
+// ---------- 提示词: what the system prompt carries outside the sections ----------
+//
+// The engine composes the system prompt from sections, and those a mod can switch and rewrite. A
+// request's `system` holds more than that: a line or two of the engine's own in front, and whatever the
+// app that started the session appended (an app's own rules for its tools, say). None of it passes
+// through `prompt.section` or `prompt.compose`, so it is read off the request the engine sends, where
+// the engine shows its requests to a mod, and shown as it is: read, never changed.
+
+/** One stretch of the system prompt that no section accounts for, and the block of `system` it stood in. */
+export type OutsidePiece = { text: string; block: number }
+
+export type OutsideSeen = {
+  pieces: OutsidePiece[]
+  /** How many blocks the request's `system` had, and how many of the sections were found in them. */
+  blocks: number
+  matched: number
+  model: string
+  atMs: number
+}
+
+/** How many requests are read before giving up, each time the look is asked for again. */
+export const OUTSIDE_TRIES = 6
+
+/** The text blocks of the `system` a model request carries; null when the body is not such a request. */
+export function systemBlocks(body: string): { blocks: string[]; model: string } | null {
+  if (body.length < 2 || body[0] !== '{' || !body.includes('"system"')) return null
+  let doc: unknown
+  try {
+    doc = JSON.parse(body)
+  } catch {
+    return null
+  }
+  if (!isObj(doc)) return null
+  const system = doc.system
+  const blocks =
+    typeof system === 'string'
+      ? [system]
+      : Array.isArray(system)
+        ? system.flatMap(b => (typeof b === 'string' ? [b] : isObj(b) && typeof b.text === 'string' ? [b.text] : []))
+        : []
+  if (blocks.length === 0) return null
+  return { blocks, model: typeof doc.model === 'string' ? doc.model : '' }
+}
+
+/**
+ * The blocks with every section's text taken out, and what is left between: each stretch that holds
+ * more than white space, in the order sent. `matched` counts the sections found, so a caller can tell
+ * the session's own prompt from another one (a subagent's, a side request's) that shares little of it.
+ */
+export function outsideOf(blocks: readonly string[], sections: readonly string[]): { pieces: OutsidePiece[]; matched: number; asked: number } {
+  // the longest first: a short section's words may also stand inside a longer one
+  const wanted = [...new Set(sections.map(s => s.trim()).filter(s => s.length >= 8))].sort((a, b) => b.length - a.length)
+  const found = new Set<string>()
+  const pieces: OutsidePiece[] = []
+  blocks.forEach((block, i) => {
+    let parts = [block]
+    for (const s of wanted) {
+      const next: string[] = []
+      for (const part of parts) {
+        const at = part.indexOf(s)
+        if (at < 0) {
+          next.push(part)
+          continue
+        }
+        found.add(s)
+        next.push(part.slice(0, at), part.slice(at + s.length))
+      }
+      parts = next
+    }
+    for (const part of parts) for (const text of splitOutside(part)) pieces.push({ text, block: i })
+  })
+  return { pieces, matched: found.size, asked: wanted.length }
+}
+
+/** A stretch this long or longer is listed by its parts, so that one of them can be found by its heading. */
+const OUTSIDE_WHOLE = 1200
+
+/**
+ * A stretch of text as the parts a reader would look for: it is cut before each first- or
+ * second-level heading, before a line that opens a tag of its own (`<browsers>`), and after a line
+ * that closes one. A short stretch stays whole; nothing inside a code fence is taken for a heading.
+ */
+export function splitOutside(text: string): string[] {
+  const whole = text.trim()
+  if (!whole) return []
+  if (whole.length < OUTSIDE_WHOLE) return [whole]
+  const parts: string[] = []
+  let cur: string[] = []
+  let isFenced = false
+  let isAfterClose = false
+  const flush = () => {
+    const part = cur.join('\n').trim()
+    if (part) parts.push(part)
+    cur = []
+  }
+  for (const line of whole.split('\n')) {
+    const isFence = /^\s*(```|~~~)/.test(line)
+    if (!isFenced && !isFence) {
+      const starts = /^#{1,2} \S/.test(line) || /^<[A-Za-z][\w-]*>\s*$/.test(line) || (isAfterClose && line.trim() !== '')
+      if (starts) flush()
+    }
+    if (isFence) isFenced = !isFenced
+    cur.push(line)
+    if (!isFenced && line.trim() !== '') isAfterClose = /^<\/[A-Za-z][\w-]*>\s*$/.test(line)
+  }
+  flush()
+  return parts
+}
+
+/** True when the blocks hold at least half of the sections: the prompt the sections were composed for. */
+export function isOwnPrompt(matched: number, asked: number): boolean {
+  return asked > 0 && matched >= Math.max(1, Math.ceil(asked / 2))
+}
+
+/** A signature of the sections as composed: it changes when one is added, dropped or rewritten. */
+export function sectionsMark(sections: readonly SectionSeen[] | null): string {
+  return sections ? sections.map(s => `${s.id}:${s.text.length}`).join('|') : ''
+}
+
+/** What a piece is called in the list: what it is when that is known, else its first line. */
+export function outsideName(text: string): string {
+  if (/^x-anthropic-billing-header:/i.test(text)) return '计费标记'
+  if (/^You are Claude Code\b/.test(text) && text.length < 400) return '身份声明'
+  // a heading is its own words; a tag is shown as it is written
+  const first = (text.split('\n').find(line => line.trim()) ?? '').trim().replace(/^#+\s*/, '')
+  return first.length > 48 ? first.slice(0, 47) + '…' : first || '（空）'
 }
 
 // ---------- 提示词: edits ----------

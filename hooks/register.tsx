@@ -114,6 +114,7 @@ import {
   EXTRA_PREFIX,
   LOAD0,
   MANAGE0,
+  OUTSIDE_TRIES,
   addHook,
   applyCompose,
   draftHook,
@@ -122,7 +123,9 @@ import {
   extraId,
   heldM,
   injectOffOf,
+  isOwnPrompt,
   mergeEdits,
+  outsideOf,
   parkedId,
   parkedOf,
   promptPrefs,
@@ -135,6 +138,7 @@ import {
   rowId,
   scanHooks,
   sectionAnswer,
+  sectionsMark,
   sessionEdits,
   setInjectOff,
   setOff,
@@ -143,6 +147,7 @@ import {
   setToolPlace,
   setToolRewrite,
   settingsFiles,
+  systemBlocks,
   toolAnswer,
   toolOffDeny,
   toolPlaceOf,
@@ -1624,6 +1629,9 @@ async function loadPrompt($: E): Promise<void> {
       if (!heldM.original.has(s.id) && edits.rewrite[s.id] === undefined && !s.id.startsWith(EXTRA_PREFIX)) heldM.original.set(s.id, s.text)
     }
     heldM.composed = seenOf(named(applyCompose(edits, out.sections), renameOf(edits)))
+    // asked for by hand: the next request the engine sends is read again for what lies outside the sections
+    heldM.outsideTries = OUTSIDE_TRIES
+    heldM.outsideUnder = sectionsMark(heldM.composed)
     const atMs = Date.now()
     await update($, manageA, (m): AtlasManage => ({ ...m, prompt: { status: 'ready', error: null, atMs } }))
   } catch (err) {
@@ -1631,6 +1639,27 @@ async function loadPrompt($: E): Promise<void> {
     await update($, manageA, (m): AtlasManage => ({ ...m, prompt: { ...m.prompt, status: 'error', error } }))
   }
   await bump($)
+}
+
+/**
+ * Reads, off a request the engine is about to send, what its system prompt carries beside the
+ * sections (manage.ts says why). Looks only: the request goes on as it was. A body is parsed only
+ * while a look is owed (after the sections changed, or the page asked), and only so many times, since
+ * a long conversation's request is large; another prompt's request (a subagent's, a side request's)
+ * shares few of the sections and is passed over.
+ */
+function noteOutside($: E, url: string, body: unknown): void {
+  if (heldM.outsideTries <= 0 || typeof body !== 'string' || !/\/v1\/messages(?:[?#]|$)/.test(url)) return
+  const sections = heldM.composed
+  if (!sections || sections.length === 0) return
+  heldM.outsideTries--
+  const sent = systemBlocks(body)
+  if (!sent) return
+  const { pieces, matched, asked } = outsideOf(sent.blocks, sections.map(s => s.text))
+  if (!isOwnPrompt(matched, asked)) return
+  heldM.outside = { pieces, blocks: sent.blocks.length, matched, model: sent.model, atMs: Date.now() }
+  heldM.outsideTries = 0
+  void bump($).catch(() => undefined)
 }
 
 function invalidatePrompt($: E): void {
@@ -2547,11 +2576,31 @@ export const register: Register = (on, options) => {
         if (!heldM.original.has(s.id) && edits.rewrite[s.id] === undefined && !s.id.startsWith(EXTRA_PREFIX)) heldM.original.set(s.id, s.text)
       }
       const sections = named(applyCompose(edits, out.sections), renameOf(edits))
-      if (!e.traits.includes('bare')) heldM.composed = seenOf(sections)
+      if (!e.traits.includes('bare')) {
+        heldM.composed = seenOf(sections)
+        // sections that changed: what lies outside them is looked for again in the requests that follow
+        const mark = sectionsMark(heldM.composed)
+        if (mark !== heldM.outsideUnder) {
+          heldM.outsideUnder = mark
+          heldM.outsideTries = OUTSIDE_TRIES
+        }
+      }
       return { ...out, sections }
     } catch {
       return out
     }
+  }).catch(($, e, next) => next(e))
+
+  // ---- 提示词: what a request's system prompt carries outside the sections; looked at, never changed ----
+
+  on('http.fetch', ($, e, next) => {
+    try {
+      // whoever sends it: what tells the session's own prompt from any other is that it holds the sections
+      noteOutside($, String(e.url), e.init?.body)
+    } catch {
+      // a look that fails costs nothing: the request goes on as it was
+    }
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   // ---- 提示词: what the engine injects into the conversation (system reminders), counted and switched ----

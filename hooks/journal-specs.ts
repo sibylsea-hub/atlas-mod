@@ -104,6 +104,7 @@ export function journalSpec(r: Data, nowMs: number, title = 'Atlas 手帐'): Jou
       const sized = [...rows.map(x => ({ label: x.id, tokens: x.sent ? approxTokens(x.sent) : 0 })), ...own.map(x => ({ label: x.name, tokens: approxTokens(x.text) }))]
       const bars: JournalBar[] = top(sized, x => x.tokens).map(x => ({ label: x.label, value: x.tokens, text: kilo(x.tokens) }))
       const injected = [...heldM.injects.values()].reduce((n, x) => n + x.chars, 0)
+      const outside = (heldM.outside?.pieces ?? []).reduce((n, p) => n + approxTokens(p.text), 0)
       return {
         ...base,
         notes: [
@@ -113,7 +114,10 @@ export function journalSpec(r: Data, nowMs: number, title = 'Atlas 手帐'): Jou
         ],
         barsTitle: '谁最占地方',
         bars,
-        stamps: injected > 0 ? [{ text: `对话里另有注入 约 ${kilo(Math.ceil(injected / 3))} tokens`, tone: 'teal' }] : [],
+        stamps: [
+          ...(injected > 0 ? [{ text: `对话里另有注入 约 ${kilo(Math.ceil(injected / 3))} tokens`, tone: 'teal' as const }] : []),
+          ...(outside > 0 ? [{ text: `段之外另有 约 ${kilo(outside)} tokens`, tone: 'purple' as const }] : []),
+        ],
       }
     }
     case 'tools': {

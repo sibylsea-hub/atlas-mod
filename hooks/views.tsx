@@ -48,6 +48,7 @@ import {
   injectName,
   injectOffOf,
   levelEdits,
+  outsideName,
   levelState,
   levelsText,
   levelsWhere,
@@ -788,6 +789,8 @@ function drawRoute(r: R, route: AtlasRoute): RenderElement[] {
       return drawHookNew(r)
     case 'inject':
       return drawInject(r, route.type)
+    case 'outside':
+      return drawOutside(r, route.index)
     case 'tool':
       return drawTool(r, route.name)
     case 'toolserver':
@@ -1747,6 +1750,7 @@ function drawPrompt(r: R): RenderElement[] {
   out.push(<Input key="px-new" label="新加一段，起个名字 " placeholder="比如：说话方式" submitLabel="新建" onSubmit={v => r.act.promptExtraNew(v)} />)
   out.push(dim(r, 'px-note', '自己加的段排在系统提示词最后；它只在新会话、/clear 或压缩之后才进提示词。'))
   out.push(...injectList(r, all))
+  out.push(...outsideList(r))
   out.push(dim(r, 'p-levels', LEVELS_NOTE))
   if (r.view.scope !== 'session') out.push(dim(r, 'p-scope-note', '改的是默认值：从下一个会话起生效，本会话不变。'))
   out.push(dim(r, 'p-when', PROMPT_WHEN))
@@ -1780,6 +1784,48 @@ function injectList(r: R, all: ReturnType<typeof levelEdits>): RenderElement[] {
   }
   out.push(...listCard(r, 'injects', injectEls))
   out.push(dim(r, 'inj-note', INJECT_NOTE))
+  return out
+}
+
+const OUTSIDE_WHY = '这些文字不走「段」这条路，所以上面的开关和改写管不到它们。Atlas 只是把它们从发出去的请求里读出来给你看，关不掉也改不了。'
+
+/**
+ * What the system prompt carries beside the sections: the engine's own opening lines, and what the
+ * app that started the session appended. Read off the request the engine last sent; shown, never changed.
+ */
+function outsideList(r: R): RenderElement[] {
+  const seen = heldM.outside
+  const out: RenderElement[] = [title(r, 'out-title', `段之外的部分 ${seen ? seen.pieces.length : 0} 块`)]
+  out.push(dim(r, 'out-what', '系统提示词里还有不属于任何一段的文字：引擎自己加的开头，和启动这个会话的 App 追加的规则（比如桌面 App 的浏览器安全规则）。'))
+  if (!seen) {
+    out.push(dim(r, 'out-none', '还没读到：要等引擎真的发出一次请求。发一条消息，再回来点「重新读取」。'))
+    out.push(dim(r, 'out-old', '终端里较旧的 CLI 不把发出的请求交给 mod 看，在那里这一栏会一直是空的。'))
+    return out
+  }
+  const chars = seen.pieces.reduce((n, p) => n + p.text.length, 0)
+  const tokens = seen.pieces.reduce((n, p) => n + approxTokens(p.text), 0)
+  out.push(dim(r, 'out-total', `读自 ${fmtHM(seen.atMs, r.tz)} 发出的请求：共 ${chars} 字符 · 约 ${tokens} tokens。`))
+  const els: RenderElement[] = []
+  seen.pieces.forEach((p, i) => {
+    els.push(rowButton(r, `out:${i}`, outsideName(p.text), `${p.text.length} 字符 · 约 ${approxTokens(p.text)} tokens · 只读`, go(r, { kind: 'outside', index: i }, `out:${i}`)))
+  })
+  out.push(...listCard(r, 'outside', els))
+  out.push(dim(r, 'out-why', OUTSIDE_WHY))
+  return out
+}
+
+function drawOutside(r: R, index: number): RenderElement[] {
+  const { Button } = r.ui
+  const piece = heldM.outside?.pieces[index]
+  if (!piece) {
+    return [backButton(r), title(r, 'out-name', '段之外的部分'), dim(r, 'out-gone', '这一块现在读不到了（Atlas 重新加载过）。发一条消息，回到提示词页点「重新读取」再看。')]
+  }
+  const out: RenderElement[] = [backButton(r), title(r, 'out-name', outsideName(piece.text))]
+  out.push(dim(r, 'out-meta', `在系统提示词的第 ${piece.block + 1} 块里 · ${piece.text.length} 字符 · 约 ${approxTokens(piece.text)} tokens · 只读`))
+  out.push(dim(r, 'out-why', OUTSIDE_WHY))
+  out.push(actions(r, [<Button key="out-copy" label="复制内容" onPress={press => r.act.copy(piece.text, press.surface)} />]))
+  out.push(title(r, 'out-text-title', '发出去的原文'))
+  out.push(sectionBox(r, 'out-text', piece.text))
   return out
 }
 
