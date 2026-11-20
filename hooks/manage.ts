@@ -74,9 +74,13 @@ export const heldM = {
   /** What the system prompt carried beside the sections, in the last request read; null until one is. */
   outside: null as OutsideSeen | null,
   /** How many more requests may be read for it: a request's body is parsed only while this is above zero. */
-  outsideTries: 0,
+  outsideTries: 6,
   /** The sections `outside` was last looked for under: their ids and lengths, to tell when they changed. */
   outsideUnder: '',
+  /** The system prompts of the last few requests read while a look was owed, newest last: matched once the sections are known. */
+  sent: [] as SentSystem[],
+  /** How many requests have been read since the module loaded, for the page to say. */
+  outsideLooked: 0,
 }
 
 // ---------- 提示词: what the system prompt carries outside the sections ----------
@@ -101,6 +105,47 @@ export type OutsideSeen = {
 
 /** How many requests are read before giving up, each time the look is asked for again. */
 export const OUTSIDE_TRIES = 6
+
+/** One request's system prompt, kept until the sections are known and it can be told whose prompt it is. */
+export type SentSystem = { blocks: string[]; model: string; atMs: number }
+
+/** How many are kept: the session's own prompt and those of a few side requests sent around it. */
+export const SENT_KEPT = 4
+
+/** The list with one more: a prompt that says the same as one kept takes its place, and the oldest go past the cap. */
+export function keepSent(list: readonly SentSystem[], one: SentSystem): SentSystem[] {
+  const same = (a: SentSystem) => a.blocks.length === one.blocks.length && a.blocks.every((b, i) => b === one.blocks[i])
+  return [...list.filter(a => !same(a)), one].slice(-SENT_KEPT)
+}
+
+/**
+ * Among the prompts kept, the one that holds the sections (the most of them, the newest on a tie),
+ * read for what lies outside them; null while the sections are not known or no prompt kept is theirs.
+ */
+export function settleOutside(sent: readonly SentSystem[], sections: readonly SectionSeen[] | null): OutsideSeen | null {
+  if (!sections || sections.length === 0) return null
+  const texts = sections.map(s => s.text)
+  let best: OutsideSeen | null = null
+  for (const one of sent) {
+    const { pieces, matched, asked } = outsideOf(one.blocks, texts)
+    if (!isOwnPrompt(matched, asked)) continue
+    if (!best || matched >= best.matched) best = { pieces, blocks: one.blocks.length, matched, model: one.model, atMs: one.atMs }
+  }
+  return best
+}
+
+/**
+ * Settles what is held: when a prompt kept is the sections' own, it becomes what the page lists and
+ * the look is over. Says whether it did.
+ */
+export function settleHeld(): boolean {
+  const seen = settleOutside(heldM.sent, heldM.composed)
+  if (!seen) return false
+  heldM.outside = seen
+  heldM.sent = []
+  heldM.outsideTries = 0
+  return true
+}
 
 /** The text blocks of the `system` a model request carries; null when the body is not such a request. */
 export function systemBlocks(body: string): { blocks: string[]; model: string } | null {

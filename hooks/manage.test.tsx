@@ -39,7 +39,7 @@ import {
 import type { HooksTable, SectionSeen } from './manage'
 import { levelEdits, levelState, levelsText, levelsWhere, sectionLevelsText } from './manage'
 import { heldM, injectCaution, injectLevelsText, injectName, injectOffOf, recordInject, setInjectOff } from './manage'
-import { isOwnPrompt, outsideName, outsideOf, sectionsMark, splitOutside, systemBlocks } from './manage'
+import { SENT_KEPT, isOwnPrompt, keepSent, outsideName, outsideOf, sectionsMark, settleOutside, splitOutside, systemBlocks } from './manage'
 import { kilo } from './journal-specs'
 import { cleanName, renameLevelsText, renameOf, renameUser, setRename } from './manage'
 import {
@@ -3947,6 +3947,29 @@ describe('manage.ts 段之外', () => {
     expect(outsideOf([INTRO, long], [INTRO]).pieces.map(p => [outsideName(p.text), p.block])).toEqual(parts.map(p => [outsideName(p), 1]))
   })
 
+  test('requests are kept, a few of them, and the one that holds the sections is settled on', () => {
+    const one = (text: string, atMs: number) => ({ blocks: [text], model: 'm', atMs })
+    const a = one('side request', 1)
+    const own = { blocks: systemBlocks(requestBody())?.blocks ?? [], model: 'm', atMs: 2 }
+    let kept = keepSent([], a)
+    kept = keepSent(kept, own)
+    // the same prompt again takes the place of the one kept, with its newer time
+    kept = keepSent(kept, { ...a, atMs: 3 })
+    expect(kept.map(k => k.atMs)).toEqual([2, 3])
+    for (let i = 0; i < 6; i++) kept = keepSent(kept, one(`other ${i}`, 10 + i))
+    expect(kept.length).toBe(SENT_KEPT)
+    expect(kept.map(k => k.atMs)).toEqual([12, 13, 14, 15])
+    const sections = [INTRO, TONE, ENV].map((text, i) => ({ id: `s${i}`, text, scope: 'shared' as const }))
+    // not known yet, or none of the kept is theirs: nothing is settled
+    expect(settleOutside([a, own], null)).toBeNull()
+    expect(settleOutside([a, own], [])).toBeNull()
+    expect(settleOutside([a, one('another', 4)], sections)).toBeNull()
+    const seen = settleOutside([a, own, one('later side request', 5)], sections)
+    expect(seen?.atMs).toBe(2)
+    expect(seen?.pieces.map(p => outsideName(p.text))).toEqual(['计费标记', '身份声明', HOST_RULES.slice(0, 47) + '…'])
+    expect([seen?.matched, seen?.blocks, seen?.model]).toEqual([3, 4, 'm'])
+  })
+
   test('a piece is named for what it is, else by its first line; the sections have a mark that changes with them', () => {
     expect(outsideName(BILLING)).toBe('计费标记')
     expect(outsideName(IDENTITY)).toBe('身份声明')
@@ -3997,14 +4020,15 @@ asBoth('提示词: what a request carries outside the sections is listed read-on
   })
   const { ui } = await openPrompt($, on, surface)
   // before any request: said plainly, with nothing to open
-  expect(await ui.find({ type: 'Text', text: /还没读到：要等引擎真的发出一次请求/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /还没读到：Atlas 加载（或重新加载）之后，这个会话还没有发出过请求/ })).toBeDefined()
   expect(await buttonKeys(ui, 'out:')).toEqual([])
-  // another prompt's request (a subagent's) is passed over
+  // another prompt's request (a subagent's) is kept, found not to be this session's, and said so
   const foreign = JSON.stringify({ model: 'claude-test', system: [{ type: 'text', text: 'A subagent prompt with nothing in common.' }], messages: [] })
   await send($, `${MESSAGES}?beta=true`, foreign)
   // a request that is not a model request is not read at all
   await send($, 'https://api.anthropic.com/api/event_logging/v2/batch', requestBody())
   expect(await buttonKeys(ui, 'out:')).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /看过 1 个请求，还没有一个对得上上面这些段/ })).toBeDefined()
   // the session's own: read, listed in the order sent
   const body = requestBody()
   await send($, `${MESSAGES}?beta=true`, body)
@@ -4043,5 +4067,39 @@ asBoth('提示词: a look at a request that cannot be read costs the request not
   expect(await send($, MESSAGES)).toBe('answered')
   expect(sent.length).toBe(5)
   expect(await buttonKeys(ui, 'out:')).toEqual([])
+  await ui.unmount()
+})
+
+asBoth('提示词: a request sent before the page was ever opened is listed as soon as the page is', async ($, on, surface) => {
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: '{}' } }))
+  const w = world(on)
+  await start($, w)
+  // the pane is up on another page: nothing has composed the prompt for Atlas yet
+  await send($, `${MESSAGES}?beta=true`, JSON.stringify({ model: 'claude-test', system: [{ type: 'text', text: 'A side request of the engine.' }], messages: [] }))
+  await send($, `${MESSAGES}?beta=true`, requestBody())
+  const ui = await mountPane($, surface)
+  await ui.press({ key: 'tab:prompt' })
+  expect(await buttonKeys(ui, 'out:')).toEqual(['out:0', 'out:1', 'out:2'])
+  expect(await rowName(ui, surface, 'out:2')).toMatch(/^Your priority is to complete the request/)
+  await ui.unmount()
+})
+
+asBoth('提示词: a pane left on this page reads the prompt again by itself when the module starts anew', async ($, on, surface) => {
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: '{}' } }))
+  // what a reload leaves: the view still on 提示词, and nothing held by the module
+  const wrote = { view: false }
+  on('state.set', { plugin: 'atlas', key: 'view' }, ($, e, next) => {
+    wrote.view = true
+    return next(e)
+  })
+  on('state.get', { plugin: 'atlas', key: 'view' }, ($, e, next) => (wrote.view ? next(e) : { value: { value: { ...VIEW0, tab: 'prompt' as const }, version: 0 } }))
+  const w = world(on)
+  await start($, w)
+  const ui = await mountPane($, surface)
+  // no tab was pressed and no 重新读取: the sections are there, and a request sent now is read
+  expect((await buttonKeys(ui, 'sec:')).sort()).toEqual(['sec:env_info_simple', 'sec:intro', 'sec:tone'])
+  expect(await ui.find({ key: 'p-none' })).toBeUndefined()
+  await send($, MESSAGES, requestBody())
+  expect(await buttonKeys(ui, 'out:')).toEqual(['out:0', 'out:1', 'out:2'])
   await ui.unmount()
 })

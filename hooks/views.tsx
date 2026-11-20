@@ -1798,7 +1798,15 @@ function outsideList(r: R): RenderElement[] {
   const out: RenderElement[] = [title(r, 'out-title', `段之外的部分 ${seen ? seen.pieces.length : 0} 块`)]
   out.push(dim(r, 'out-what', '系统提示词里还有不属于任何一段的文字：引擎自己加的开头，和启动这个会话的 App 追加的规则（比如桌面 App 的浏览器安全规则）。'))
   if (!seen) {
-    out.push(dim(r, 'out-none', '还没读到：要等引擎真的发出一次请求。发一条消息，再回来点「重新读取」。'))
+    out.push(
+      dim(
+        r,
+        'out-none',
+        heldM.outsideLooked === 0
+          ? '还没读到：Atlas 加载（或重新加载）之后，这个会话还没有发出过请求。发一条消息，这里就会有内容。'
+          : `看过 ${heldM.outsideLooked} 个请求，还没有一个对得上上面这些段。点「重新读取」，再发一条消息试试。`,
+      ),
+    )
     out.push(dim(r, 'out-old', '终端里较旧的 CLI 不把发出的请求交给 mod 看，在那里这一栏会一直是空的。'))
     return out
   }

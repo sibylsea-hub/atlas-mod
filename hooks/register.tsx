@@ -123,9 +123,8 @@ import {
   extraId,
   heldM,
   injectOffOf,
-  isOwnPrompt,
+  keepSent,
   mergeEdits,
-  outsideOf,
   parkedId,
   parkedOf,
   promptPrefs,
@@ -140,6 +139,7 @@ import {
   sectionAnswer,
   sectionsMark,
   sessionEdits,
+  settleHeld,
   setInjectOff,
   setOff,
   setRename,
@@ -753,6 +753,18 @@ async function back($: E): Promise<void> {
   if (under?.kind === 'file') await openFile($, under.path, {})
   if (top?.kind === 'file') rescanIfDirty($)
   focusSoon($, top?.from ?? 'tab:' + v.tab)
+}
+
+/**
+ * Reads the prompt again when the pane stands on the 提示词 page with nothing held for it. A reload
+ * empties what the module holds while the pane keeps its place, and no tab is switched to bring the
+ * sections back: without this the page would say only 点「重新读取」 until that is pressed.
+ */
+async function primePage($: E): Promise<void> {
+  if (heldM.composed) return
+  const v = await read($, viewA)
+  const top = v.stack[v.stack.length - 1]?.kind
+  if (v.tab === 'prompt' || top === 'section' || top === 'inject' || top === 'outside') await loadPrompt($)
 }
 
 async function switchTab($: E, tab: AtlasView['tab']): Promise<void> {
@@ -1629,9 +1641,11 @@ async function loadPrompt($: E): Promise<void> {
       if (!heldM.original.has(s.id) && edits.rewrite[s.id] === undefined && !s.id.startsWith(EXTRA_PREFIX)) heldM.original.set(s.id, s.text)
     }
     heldM.composed = seenOf(named(applyCompose(edits, out.sections), renameOf(edits)))
-    // asked for by hand: the next request the engine sends is read again for what lies outside the sections
-    heldM.outsideTries = OUTSIDE_TRIES
+    // the sections are known now: a request read before this is matched against them at once, and, asked
+    // for by hand, the next ones the engine sends are read again
     heldM.outsideUnder = sectionsMark(heldM.composed)
+    settleHeld()
+    heldM.outsideTries = OUTSIDE_TRIES
     const atMs = Date.now()
     await update($, manageA, (m): AtlasManage => ({ ...m, prompt: { status: 'ready', error: null, atMs } }))
   } catch (err) {
@@ -1650,15 +1664,14 @@ async function loadPrompt($: E): Promise<void> {
  */
 function noteOutside($: E, url: string, body: unknown): void {
   if (heldM.outsideTries <= 0 || typeof body !== 'string' || !/\/v1\/messages(?:[?#]|$)/.test(url)) return
-  const sections = heldM.composed
-  if (!sections || sections.length === 0) return
   heldM.outsideTries--
   const sent = systemBlocks(body)
   if (!sent) return
-  const { pieces, matched, asked } = outsideOf(sent.blocks, sections.map(s => s.text))
-  if (!isOwnPrompt(matched, asked)) return
-  heldM.outside = { pieces, blocks: sent.blocks.length, matched, model: sent.model, atMs: Date.now() }
-  heldM.outsideTries = 0
+  // kept whether or not the sections are known yet: a request sent before the page was ever opened is
+  // matched when it is (loadPrompt), so the order of the two does not matter
+  heldM.outsideLooked++
+  heldM.sent = keepSent(heldM.sent, { blocks: sent.blocks, model: sent.model, atMs: Date.now() })
+  settleHeld()
   void bump($).catch(() => undefined)
 }
 
@@ -2401,6 +2414,7 @@ async function atlasWindow($: E, wish: WindowWish): Promise<{ text: string } | {
   const failed = await startWindow($)
   if (failed) return wish === 'auto' ? { note: `${failed}先打开了嵌在终端里的面板。` } : { text: failed }
   if (!held.index && !held.scanning) void startScan($)
+  void primePage($).catch(() => undefined)
   const now = (await safe(() => $.clock.now())) ?? Date.now()
   if (wish === 'auto' && (now - heldW.openedAtMs < WINDOW_OPENING_MS || (await windowPages($)) > 0)) return { text: WINDOW_ALREADY }
   const res = await safe(() => windowHttp($, 'POST', '/open', '{}'))
@@ -2442,7 +2456,11 @@ export const register: Register = (on, options) => {
     }
     try {
       const panes = await $.ui.panes()
-      if (panes.some(p => p.id === PANE) && !held.index) void startScan($)
+      if (panes.some(p => p.id === PANE)) {
+        if (!held.index) void startScan($)
+        // a reload: the pane is still up on its page, and what that page lists went with the old module
+        void primePage($).catch(() => undefined)
+      }
     } catch {
       // nothing open
     }
@@ -2461,6 +2479,7 @@ export const register: Register = (on, options) => {
     const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true })
     if (opened.isPlaced) {
       if (!held.index && !held.scanning) void startScan($)
+      void primePage($).catch(() => undefined)
       return { text: `${lead}已打开 Atlas 面板。` }
     }
     // Not drawn now: the pane stays open, and a surface that attaches later draws it (session.attach
@@ -2582,7 +2601,7 @@ export const register: Register = (on, options) => {
         const mark = sectionsMark(heldM.composed)
         if (mark !== heldM.outsideUnder) {
           heldM.outsideUnder = mark
-          heldM.outsideTries = OUTSIDE_TRIES
+          if (!settleHeld()) heldM.outsideTries = OUTSIDE_TRIES
         }
       }
       return { ...out, sections }
